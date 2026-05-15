@@ -1,0 +1,44 @@
+{
+  "build": {
+    "beforeBuildCommand": "",
+    "beforeDevCommand": "",
+    "devPath": ".",
+    "distDir": ".",
+    "withGlobalTauri": true
+  },
+  "package": {
+    "productName": "csi-tray",
+    "version": "0.1.0"
+  },
+  "tauri": {
+    "allowlist": {
+      "all": true
+    },
+    "bundle": {
+      "active": false,
+      "identifier": "com.csi.tray",
+      "targets": "all"
+    },
+    "macOSPrivateApi": true,
+    "security": {
+      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' tauri:; script-src 'self' 'unsafe-inline' 'unsafe-eval' tauri:; style-src 'self' 'unsafe-inline' tauri:; connect-src 'self' tauri: ipc: ws: wss: http: https:;"
+    },
+    "systemTray": {
+      "iconPath": "icons/icon.png",
+      "iconAsTemplate": true
+    },
+    "windows": [
+      {
+        "title": "CSI",
+        "width": 320,
+        "height": 450,
+        "resizable": false,
+        "fullscreen": false,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true
+      }
+    ]
+  }
+}

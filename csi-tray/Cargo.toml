@@ -1,0 +1,14 @@
+[package]
+name = "csi-tray"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.102"
+csi-ipc = { version = "0.1.0", path = "../csi-ipc" }
+serde_json = "1.0.149"
+tauri = { version = "1.6", features = ["api-all", "macos-private-api", "system-tray"] }
+tokio = { version = "1.52.3", features = ["net", "io-util"] }
+
+[build-dependencies]
+tauri-build = "1"

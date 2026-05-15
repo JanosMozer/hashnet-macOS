@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>CSI Tray</title>
+  <style>
+    :root {
+      --bg: rgba(30, 30, 30, 0.95);
+      --bg-hover: #3a3a3c;
+      --text-main: #ffffff;
+      --text-sub: #98989d;
+      --accent: #0A84FF;
+      --border: #424242;
+      --radius: 8px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 320px;
+      height: 100vh;
+      margin: 0;
+      background: transparent;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      overflow: hidden;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    body {
+      background-color: var(--bg);
+      border-radius: var(--radius);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    }
+
+    #error-bar {
+      display: none;
+      background: #FF453A;
+      color: #fff;
+      font-size: 12px;
+      padding: 6px 14px;
+      text-align: center;
+      font-weight: 500;
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      padding: 8px 14px;
+      cursor: default;
+      position: relative;
+    }
+    
+    .row.clickable {
+      cursor: pointer;
+    }
+
+    .row.clickable:hover {
+      background-color: var(--bg-hover);
+    }
+
+    .row-text {
+      display: flex;
+      flex-direction: column;
+      flex-grow: 1;
+    }
+
+    .title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-main);
+      letter-spacing: -0.1px;
+    }
+
+    .subtitle {
+      font-size: 12px;
+      font-weight: 400;
+      color: var(--text-sub);
+      margin-top: 2px;
+    }
+
+    .row-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text-sub);
+    }
+
+    hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 2px 0;
+    }
+
+    /* Toggle Switch */
+    .toggle {
+      position: relative;
+      display: inline-block;
+      width: 40px;
+      height: 24px;
+    }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .track {
+      position: absolute; cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background-color: #39393d;
+      transition: .2s; border-radius: 24px;
+    }
+    .track:before {
+      position: absolute; content: "";
+      height: 20px; width: 20px;
+      left: 2px; bottom: 2px;
+      background-color: white;
+      transition: .2s; border-radius: 50%;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    }
+    input:checked + .track { background-color: var(--accent); }
+    input:checked + .track:before { transform: translateX(16px); }
+
+    /* Account Section */
+    .account-avatar {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: #444;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-size: 14px;
+      font-weight: 600;
+      margin-right: 12px;
+      overflow: hidden;
+    }
+    .account-avatar img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    
+    .chevron::after {
+      content: "›";
+      font-size: 18px;
+      font-weight: 400;
+      color: var(--text-sub);
+      margin-left: auto;
+    }
+
+    /* Lists */
+    .list-panel {
+      display: none;
+      flex-direction: column;
+      background: rgba(0,0,0,0.2);
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      max-height: 120px;
+      overflow-y: auto;
+    }
+    .list-panel.open { display: flex; }
+    .list-item {
+      padding: 6px 14px 6px 36px;
+      font-size: 12px;
+      color: var(--text-sub);
+    }
+    
+    .shortcut {
+      font-size: 12px;
+      letter-spacing: 1px;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="error-bar"></div>
+
+  <!-- Header -->
+  <div class="row">
+    <div class="row-text">
+      <div class="title">CSI Secure Core</div>
+      <div class="subtitle" id="systemStateText">Connecting...</div>
+    </div>
+    <div class="row-right">
+      <label class="toggle">
+        <input type="checkbox" id="systemToggle" checked>
+        <span class="track"></span>
+      </label>
+    </div>
+  </div>
+
+  <hr>
+
+  <!-- Account -->
+  <div class="row clickable" id="btnAccount">
+    <div class="account-avatar" id="avatarFallback">U</div>
+    <div class="row-text">
+      <div class="title" id="userName">Not logged in</div>
+      <div class="subtitle" id="userSub">Click to login</div>
+    </div>
+    <div class="chevron"></div>
+  </div>
+
+  <hr>
+
+  <!-- Device Info -->
+  <div class="row">
+    <div class="row-text">
+      <div class="title" style="font-weight: 500;" id="deviceStatus">This Device: Loading...</div>
+    </div>
+  </div>
+
+  <div class="row clickable" id="btnNetwork">
+    <div class="title" style="font-weight: 500;">Network Devices</div>
+    <div class="row-right" style="margin-left: auto;">
+      <div class="chevron"></div>
+    </div>
+  </div>
+  <div id="networkList" class="list-panel"></div>
+
+  <div class="row clickable" id="btnConnections">
+    <div class="title" style="font-weight: 500;">Connections</div>
+    <div class="row-right" style="margin-left: auto;">
+      <div class="chevron"></div>
+    </div>
+  </div>
+  <div id="connList" class="list-panel"></div>
+  
+  <hr>
+
+  <!-- Settings / Commands -->
+  <div class="row clickable" id="btnSync">
+    <div class="title" style="font-weight: 500;">Sync Keys</div>
+  </div>
+  
+  <div class="row clickable">
+    <div class="title" style="font-weight: 500;">Settings...</div>
+    <div class="row-right" style="margin-left: auto;">
+      <span class="shortcut"> ,</span>
+    </div>
+  </div>
+
+  <hr>
+
+  <div class="row clickable" id="btnQuit">
+    <div class="title" style="font-weight: 500;">Quit</div>
+    <div class="row-right" style="margin-left: auto;">
+      <span class="shortcut"> Q</span>
+    </div>
+  </div>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      window.onerror = function(msg) {
+        showError('Err: ' + msg);
+      };
+      window.onunhandledrejection = function(event) {
+        showError('Rej: ' + event.reason);
+      };
+
+      const t = window.__TAURI__;
+      const invoke = (t && (t.invoke || t.tauri?.invoke)) || null;
+
+      if (!invoke) {
+        document.getElementById('systemStateText').textContent = 'Tauri API Missing';
+        document.getElementById('systemStateText').style.color = '#FF453A';
+      }
+
+      function showError(msg) {
+        const bar = document.getElementById('error-bar');
+        if (!bar) return;
+        bar.textContent = msg;
+        bar.style.display = 'block';
+        setTimeout(() => { bar.style.display = 'none'; }, 6000);
+      }
+
+      async function ipc(req) {
+        if (!invoke) return;
+        try {
+          return await invoke('send_ipc_command', { req });
+        } catch (e) {
+          showError(String(e));
+          throw e;
+        }
+      }
+
+      let loggedInUser = null;
+      let networkOpen = false;
+      let connOpen = false;
+      let oauthPollTimer = null;
+
+      // ── Login button ───────────────────────────────────────────────────────────
+      document.getElementById('btnAccount').addEventListener('click', async () => {
+        if (loggedInUser) return;
+
+        try {
+          document.getElementById('userSub').textContent = 'Opening browser…';
+          
+          // Tell csid to open the browser AND start the localhost callback server.
+          // csid now handles the PKCE challenge generation and token exchange internally.
+          const resp = await ipc('StartOAuthFlow');
+          if (resp && resp.Error) { showError('OAuth Error: ' + resp.Error); return; }
+
+          document.getElementById('userSub').textContent = 'Waiting for browser login…';
+
+          if (oauthPollTimer) clearInterval(oauthPollTimer);
+          oauthPollTimer = setInterval(async () => {
+            const s = await ipc('GetStatus').catch(() => null);
+            if (s && s.Status && s.Status.is_active) {
+              clearInterval(oauthPollTimer);
+              oauthPollTimer = null;
+              await updateStatus();
+            }
+          }, 2000);
+
+        } catch (e) {
+          showError('Login Error: ' + e);
+        }
+      });
+
+      document.getElementById('btnNetwork').addEventListener('click', async () => {
+        if (!loggedInUser) { showError('Login first'); return; }
+        networkOpen = !networkOpen;
+        const panel = document.getElementById('networkList');
+        if (networkOpen) {
+          panel.innerHTML = '<div class="list-item">Loading…</div>';
+          panel.classList.add('open');
+          try {
+            const resp = await ipc('GetNetworkDevices');
+            if (resp?.NetworkDevices) {
+              const devs = resp.NetworkDevices;
+              panel.innerHTML = devs.length
+                ? devs.map(d => `<div class="list-item">${d.slice(0,28)}…</div>`).join('')
+                : '<div class="list-item">No devices</div>';
+            } else {
+              panel.innerHTML = `<div class="list-item">${resp?.Error ?? 'Error'}</div>`;
+            }
+          } catch (_) { panel.innerHTML = '<div class="list-item">Error</div>'; }
+        } else {
+          panel.classList.remove('open');
+        }
+      });
+
+      document.getElementById('btnConnections').addEventListener('click', async () => {
+        if (!loggedInUser) { showError('Login first'); return; }
+        connOpen = !connOpen;
+        const panel = document.getElementById('connList');
+        if (connOpen) {
+          panel.innerHTML = '<div class="list-item">Loading…</div>';
+          panel.classList.add('open');
+          try {
+            const resp = await ipc('GetConnections');
+            if (resp?.Connections) {
+              const cs = resp.Connections;
+              panel.innerHTML = cs.length
+                ? cs.map(c => `<div class="list-item">${c}</div>`).join('')
+                : '<div class="list-item">No accepted connections</div>';
+            } else {
+              panel.innerHTML = `<div class="list-item">${resp?.Error ?? 'Error'}</div>`;
+            }
+          } catch (_) { panel.innerHTML = '<div class="list-item">Error</div>'; }
+        } else {
+          panel.classList.remove('open');
+        }
+      });
+
+      document.getElementById('btnSync').addEventListener('click', async () => {
+        try {
+          const resp = await ipc('SyncKeys');
+          if (resp?.Error) showError('Sync: ' + resp.Error);
+          else {
+             const bar = document.getElementById('error-bar');
+             bar.textContent = 'Keys synced ';
+             bar.style.background = '#30D158';
+             bar.style.display = 'block';
+             setTimeout(() => { bar.style.display = 'none'; bar.style.background = '#FF453A'; }, 3000);
+          }
+        } catch (_) {}
+      });
+
+      document.getElementById('btnQuit').addEventListener('click', async () => {
+        await ipc('RotatePnk').catch(() => {});
+        window.__TAURI__?.process?.exit(0) ?? window.close();
+      });
+
+      async function updateStatus() {
+        try {
+          const resp = await ipc('GetStatus');
+          const s = resp?.Status;
+          if (!s) return;
+
+          const { hostname, is_active, state } = s;
+          
+          document.getElementById('deviceStatus').innerHTML =
+            `This Device: ${hostname}`;
+
+          document.getElementById('systemStateText').textContent =
+            state.includes('Ready') ? 'Connected' : 'Disconnected';
+
+          document.getElementById('systemToggle').checked =
+            !state.includes('Waiting');
+            
+          if (is_active && !loggedInUser) {
+            loggedInUser = 'active_session';
+            document.getElementById('userName').textContent = 'User Profile';
+            document.getElementById('userSub').textContent = 'Session Active';
+            document.getElementById('avatarFallback').textContent = 'U';
+            document.getElementById('avatarFallback').style.background = '#444';
+          }
+            
+        } catch (e) {
+          document.getElementById('deviceStatus').innerHTML =
+            `<span style="color:#FF453A">Daemon offline</span>`;
+          document.getElementById('systemStateText').textContent = 'Offline';
+        }
+      }
+
+      setInterval(updateStatus, 5000);
+      updateStatus();
+    });
+  </script>
+</body>
+</html>
