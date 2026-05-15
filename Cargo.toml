@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "csi-core",
+    "csi-ipc",
+    "csid",
+    "csi-tray"
+]
+resolver = "2"
