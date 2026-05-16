@@ -46,20 +46,20 @@ impl SupabaseClient {
             .get(&endpoint)
             .query(&[
                 ("user_id", format!("eq.{}", user_id)),
-                ("select", "public_hik".to_string()),
+                ("select", "device_name".to_string()),
             ])
             .send()
             .await?
             .error_for_status()?;
 
         #[derive(Deserialize)]
-        struct HikRecord {
-            public_hik: String,
+        struct DeviceRecord {
+            device_name: String,
         }
 
-        let records: Vec<HikRecord> = response.json().await?;
+        let records: Vec<DeviceRecord> = response.json().await?;
 
-        Ok(records.into_iter().map(|r| r.public_hik).collect())
+        Ok(records.into_iter().map(|r| r.device_name).collect())
     }
 
     pub async fn push_wrapped_pnk(
@@ -100,6 +100,24 @@ impl SupabaseClient {
 
     pub async fn register_device(&self, user_id: String, device_name: String, public_hik: String) -> Result<()> {
         let endpoint = format!("{}/rest/v1/devices", self.url);
+
+        // Check if device already exists for this HIK
+        let check_resp = self.client.get(&endpoint)
+            .query(&[("public_hik", format!("eq.{}", public_hik))])
+            .send().await?.error_for_status()?;
+        
+        let existing: Vec<serde_json::Value> = check_resp.json().await?;
+        if !existing.is_empty() {
+            // Already registered, just update is_active
+            if let Some(id) = existing[0].get("id") {
+                let patch_url = format!("{}?id=eq.{}", endpoint, id.as_str().unwrap_or_default());
+                self.client.patch(&patch_url)
+                    .json(&serde_json::json!({ "is_active": true }))
+                    .send().await?.error_for_status()?;
+            }
+            return Ok(());
+        }
+
         let payload = serde_json::json!({
             "user_id": user_id,
             "device_name": device_name,
@@ -114,6 +132,16 @@ impl SupabaseClient {
             let body = resp.text().await.unwrap_or_default();
             anyhow::bail!("register_device failed {}: {}", status, body);
         }
+        Ok(())
+    }
+
+    pub async fn set_device_status(&self, public_hik: String, is_active: bool) -> Result<()> {
+        let endpoint = format!("{}/rest/v1/devices", self.url);
+        let patch_url = format!("{}?public_hik=eq.{}", endpoint, public_hik);
+        
+        self.client.patch(&patch_url)
+            .json(&serde_json::json!({ "is_active": is_active }))
+            .send().await?.error_for_status()?;
         Ok(())
     }
 
