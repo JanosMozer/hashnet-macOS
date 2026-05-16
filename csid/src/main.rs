@@ -17,8 +17,8 @@ use csi_core::crypto::{HardwareIdentity, PersonalNetworkKey};
 use csi_ipc::{IpcRequest, IpcResponse};
 
 const OAUTH_CALLBACK_PORT: u16 = 14555;
-const AUTH_BASE_URL: &str = "http://localhost:3000/api/auth/authorize";
-const TOKEN_URL: &str = "http://localhost:3000/api/auth/token";
+const AUTH_BASE_URL: &str = "https://bluehashsecurity.com/api/auth/authorize";
+const TOKEN_URL: &str = "https://bluehashsecurity.com/api/auth/token";
 const CLIENT_ID: &str = "bluehash-desktop";
 const REDIRECT_URI: &str = "http://127.0.0.1:14555";
 
@@ -27,13 +27,16 @@ struct DaemonState {
     pnk: Option<PersonalNetworkKey>,
     broker: Option<SupabaseClient>,
     logged_in_user: Option<String>,
+    user_email: Option<String>,
+    user_image: Option<String>,
     oauth_listening: bool,
 }
 
 #[derive(Deserialize, Debug)]
 struct TokenResponse {
     user_id: String,
-    // access_token: String, etc.
+    email: Option<String>,
+    image_url: Option<String>,
 }
 
 #[tokio::main]
@@ -56,6 +59,8 @@ async fn main() -> Result<()> {
         pnk: None,
         broker,
         logged_in_user: None,
+        user_email: None,
+        user_image: None,
         oauth_listening: false,
     }));
 
@@ -134,8 +139,7 @@ fn generate_pkce() -> (String, String) {
     (verifier, challenge)
 }
 
-/// Waits for a single OAuth redirect on localhost:14555 with a 5 minute timeout.
-async fn wait_for_oauth_code(code_verifier: String) -> Result<String> {
+async fn wait_for_oauth_code(code_verifier: String) -> Result<TokenResponse> {
     use tokio::net::TcpListener;
     use tokio::time::{timeout, Duration};
 
@@ -145,7 +149,6 @@ async fn wait_for_oauth_code(code_verifier: String) -> Result<String> {
 
     println!("[csid] Waiting for OAuth callback on http://127.0.0.1:{}", OAUTH_CALLBACK_PORT);
 
-    // Give the user 5 minutes to log in before the listener self-destructs
     let (stream, _) = timeout(Duration::from_secs(300), listener.accept())
         .await
         .context("OAuth login timed out after 5 minutes")??;
@@ -177,7 +180,6 @@ async fn wait_for_oauth_code(code_verifier: String) -> Result<String> {
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("No code in OAuth callback URL"))?;
 
-    // Perform token exchange
     println!("[csid] Exchanging code for token...");
     let client = reqwest::Client::new();
     let resp = client
@@ -194,9 +196,8 @@ async fn wait_for_oauth_code(code_verifier: String) -> Result<String> {
         .error_for_status()?;
 
     let token_data: TokenResponse = resp.json().await?;
-    let user_id = token_data.user_id;
+    println!("[csid] Received token data: {:?}", token_data);
 
-    // Send success HTML
     let inner_stream = stream.into_inner();
     let mut inner_stream = inner_stream;
 
@@ -227,7 +228,7 @@ async fn wait_for_oauth_code(code_verifier: String) -> Result<String> {
     );
     inner_stream.write_all(response.as_bytes()).await?;
 
-    Ok(user_id)
+    Ok(token_data)
 }
 
 async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> IpcResponse {
@@ -248,13 +249,14 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
                 is_active,
                 state: status.to_string(),
                 hik: s.identity.export_public_hik(),
+                email: s.user_email.clone(),
+                image_url: s.user_image.clone(),
             }
         }
         IpcRequest::StartOAuthFlow => {
             {
                 let mut s = state.write().await;
                 if s.oauth_listening {
-                    eprintln!("[csid] OAuth flow already in progress — ignoring duplicate request");
                     return IpcResponse::Error("Login already in progress. Check your browser.".into());
                 }
                 s.oauth_listening = true;
@@ -271,8 +273,6 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
                 challenge
             );
 
-            println!("[csid] Opening browser to: {}", url);
-
             if let Err(e) = open::that(&url) {
                 let mut s = state_clone.write().await;
                 s.oauth_listening = false;
@@ -281,19 +281,18 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
 
             tokio::spawn(async move {
                 match wait_for_oauth_code(verifier).await {
-                    Ok(user_id) => {
+                    Ok(data) => {
                         let mut s = state_clone.write().await;
                         s.oauth_listening = false;
-                        s.logged_in_user = Some(user_id.clone());
+                        s.logged_in_user = Some(data.user_id.clone());
+                        s.user_email = data.email;
+                        s.user_image = data.image_url;
                         if let Some(broker) = &s.broker {
                             let hostname = gethostname::gethostname().to_string_lossy().to_string();
                             let hik = s.identity.export_public_hik();
-                            if let Err(e) = broker.register_device(user_id.clone(), hostname, hik).await {
-                                eprintln!("[csid] register_device error: {}", e);
-                            }
+                            let _ = broker.register_device(data.user_id.clone(), hostname, hik).await;
                         }
                         s.pnk = Some(PersonalNetworkKey::new_random());
-                        println!("[csid] OAuth complete — logged in as {}", user_id);
                     }
                     Err(e) => {
                         eprintln!("[csid] OAuth error: {}", e);
@@ -333,17 +332,9 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
             if let Some(broker) = &s.broker {
                 let hostname = gethostname::gethostname().to_string_lossy().to_string();
                 let hik = s.identity.export_public_hik();
-                match broker.register_device(user_id.clone(), hostname, hik).await {
-                    Ok(_) => {
-                        eprintln!("[csid] device registered for user {}", user_id);
-                        s.pnk = Some(PersonalNetworkKey::new_random());
-                    },
-                    Err(e) => {
-                        eprintln!("[csid] register_device error: {}", e);
-                        return IpcResponse::Error(format!("Device registration failed: {}", e));
-                    }
-                }
+                let _ = broker.register_device(user_id.clone(), hostname, hik).await;
             }
+            s.pnk = Some(PersonalNetworkKey::new_random());
             IpcResponse::Success
         }
         IpcRequest::GetNetworkDevices => {
@@ -363,6 +354,18 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
                 }
             }
             IpcResponse::Error("Failed to fetch connections".into())
+        }
+        IpcRequest::Logout => {
+            let mut s = state.write().await;
+            if let Some(broker) = &s.broker {
+                let hik = s.identity.export_public_hik();
+                let _ = broker.set_device_status(hik, false).await;
+            }
+            s.logged_in_user = None;
+            s.user_email = None;
+            s.user_image = None;
+            s.pnk = None;
+            IpcResponse::Success
         }
     }
 }
