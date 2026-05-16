@@ -39,10 +39,20 @@ fn main() {
     tauri::Builder::default()
         .setup(|app| {
             tauri::async_runtime::spawn(async move {
-                println!("Testing IPC connection on startup...");
-                match send_ipc_command_inner(csi_ipc::IpcRequest::GetStatus).await {
-                    Ok(resp) => println!("Startup IPC test succeeded: {:?}", resp),
-                    Err(e) => println!("Startup IPC test failed: {}", e),
+                // Retry until csid is ready (it may not have started yet)
+                for attempt in 1..=20 {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    match send_ipc_command_inner(csi_ipc::IpcRequest::GetStatus).await {
+                        Ok(resp) => {
+                            println!("Startup IPC connected (attempt {}): {:?}", attempt, resp);
+                            break;
+                        }
+                        Err(e) => {
+                            if attempt == 20 {
+                                println!("Startup IPC failed after 20 attempts: {}", e);
+                            }
+                        }
+                    }
                 }
             });
             Ok(())
@@ -69,7 +79,12 @@ fn main() {
         .on_window_event(|event| match event.event() {
             tauri::WindowEvent::Focused(is_focused) => {
                 if !is_focused {
-                    event.window().hide().unwrap();
+                    let window = event.window().clone();
+                    // Small delay so mousedown/click handlers fire before the window hides
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+                        let _ = window.hide();
+                    });
                 }
             }
             _ => {}

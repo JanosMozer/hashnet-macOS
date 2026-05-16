@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>CSI Tray</title>
+  <title>Hashnet</title>
   <style>
     :root {
       --bg: rgba(30, 30, 30, 0.95);
@@ -10,415 +10,250 @@
       --text-main: #ffffff;
       --text-sub: #98989d;
       --accent: #0A84FF;
-      --border: #424242;
+      --border: rgba(255,255,255,0.08);
       --radius: 8px;
     }
-
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-
-    html, body {
-      width: 320px;
-      height: 100vh;
-      margin: 0;
-      background: transparent;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      overflow: hidden;
-      user-select: none;
-      -webkit-user-select: none;
-    }
-
+    * { box-sizing: border-box; margin: 0; padding: 0; font-weight: 400; }
+    html { height: 100%; background: transparent; }
     body {
-      background-color: var(--bg);
-      border-radius: var(--radius);
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      display: flex;
-      flex-direction: column;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+      width: 320px; height: fit-content; background: transparent;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      overflow: hidden; user-select: none; -webkit-user-select: none;
     }
-
-    #error-bar {
-      display: none;
-      background: #FF453A;
-      color: #fff;
-      font-size: 12px;
-      padding: 6px 14px;
-      text-align: center;
-      font-weight: 500;
+    #body-wrap {
+      background: var(--bg); border-radius: var(--radius);
+      border: 1px solid rgba(255,255,255,0.1);
+      display: flex; flex-direction: column;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5); position: relative;
     }
-
-    .row {
-      display: flex;
-      align-items: center;
-      padding: 8px 14px;
-      cursor: default;
-      position: relative;
-    }
-    
-    .row.clickable {
-      cursor: pointer;
-    }
-
-    .row.clickable:hover {
-      background-color: var(--bg-hover);
-    }
-
-    .row-text {
-      display: flex;
-      flex-direction: column;
-      flex-grow: 1;
-    }
-
-    .title {
-      font-size: 14px;
-      font-weight: 600;
-      color: var(--text-main);
-      letter-spacing: -0.1px;
-    }
-
-    .subtitle {
-      font-size: 12px;
-      font-weight: 400;
-      color: var(--text-sub);
-      margin-top: 2px;
-    }
-
-    .row-right {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      color: var(--text-sub);
-    }
-
-    hr {
-      border: none;
-      border-top: 1px solid var(--border);
-      margin: 2px 0;
-    }
-
-    /* Toggle Switch */
-    .toggle {
-      position: relative;
-      display: inline-block;
-      width: 40px;
-      height: 24px;
-    }
+    #error-bar { display: none; font-size: 11px; padding: 4px 10px; background: #FF453A; color: #fff; word-break: break-all; }
+    .row { display: flex; align-items: center; padding: 9px 14px; cursor: pointer; min-height: 42px; }
+    .row:hover { background: var(--bg-hover); }
+    .row-text { display: flex; flex-direction: column; flex-grow: 1; }
+    .title { font-size: 13px; color: var(--text-main); }
+    .subtitle { font-size: 12px; color: var(--text-sub); margin-top: 2px; }
+    hr { border: none; border-top: 1px solid var(--border); margin: 2px 0; }
+    .toggle { position: relative; display: inline-block; width: 40px; height: 24px; }
     .toggle input { opacity: 0; width: 0; height: 0; }
-    .track {
-      position: absolute; cursor: pointer;
-      top: 0; left: 0; right: 0; bottom: 0;
-      background-color: #39393d;
-      transition: .2s; border-radius: 24px;
-    }
-    .track:before {
-      position: absolute; content: "";
-      height: 20px; width: 20px;
-      left: 2px; bottom: 2px;
-      background-color: white;
-      transition: .2s; border-radius: 50%;
-      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-    }
-    input:checked + .track { background-color: var(--accent); }
+    .track { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: #39393d; transition: .2s; border-radius: 24px; }
+    .track:before { position: absolute; content: ""; height: 20px; width: 20px; left: 2px; bottom: 2px; background: white; transition: .2s; border-radius: 50%; }
+    input:checked + .track { background: var(--accent); }
     input:checked + .track:before { transform: translateX(16px); }
-
-    /* Account Section */
-    .account-avatar {
-      width: 36px;
-      height: 36px;
-      border-radius: 50%;
-      background: #444;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: #fff;
-      font-size: 14px;
-      font-weight: 600;
-      margin-right: 12px;
-      overflow: hidden;
-    }
-    .account-avatar img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-    }
-    
-    .chevron::after {
-      content: "›";
-      font-size: 18px;
-      font-weight: 400;
-      color: var(--text-sub);
-      margin-left: auto;
-    }
-
-    /* Lists */
-    .list-panel {
-      display: none;
-      flex-direction: column;
-      background: rgba(0,0,0,0.2);
-      border-top: 1px solid var(--border);
-      border-bottom: 1px solid var(--border);
-      max-height: 120px;
-      overflow-y: auto;
-    }
-    .list-panel.open { display: flex; }
-    .list-item {
-      padding: 6px 14px 6px 36px;
-      font-size: 12px;
-      color: var(--text-sub);
-    }
-    
-    .shortcut {
-      font-size: 12px;
-      letter-spacing: 1px;
-    }
+    .avatar { width: 34px; height: 34px; border-radius: 50%; background: #444; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 14px; margin-right: 12px; overflow: hidden; flex-shrink: 0; }
+    .avatar img { width: 100%; height: 100%; object-fit: cover; }
+    .chevron { color: var(--text-sub); font-size: 16px; transition: transform 0.2s; }
+    .chevron.rotated { transform: rotate(90deg); }
+    .list-panel { max-height: 0; overflow: hidden; transition: max-height 0.2s ease; }
+    .list-panel.open { max-height: 160px; overflow-y: auto; }
+    .list-item { padding: 8px 40px; font-size: 12px; color: var(--text-sub); border-bottom: 1px solid rgba(255,255,255,0.03); }
+    .list-item:last-child { border-bottom: none; }
+    .connected-only { display: none; }
+    #account-modal { display: none; position: absolute; top: 86px; right: 14px; z-index: 200; }
+    #account-modal-box { background: rgba(45,45,45,0.99); border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.6); overflow: hidden; min-width: 160px; }
+    .modal-row { padding: 10px 16px; font-size: 13px; color: var(--text-main); cursor: pointer; }
+    .modal-row:hover { background: var(--bg-hover); }
+    .modal-row.danger { color: #FF453A; }
   </style>
 </head>
 <body>
+  <div id="body-wrap">
+    <div id="error-bar"></div>
 
-  <div id="error-bar"></div>
-
-  <!-- Header -->
-  <div class="row">
-    <div class="row-text">
-      <div class="title">CSI Secure Core</div>
-      <div class="subtitle" id="systemStateText">Connecting...</div>
-    </div>
-    <div class="row-right">
+    <div class="row" style="cursor:default">
+      <div class="row-text">
+        <div class="title">Hashnet</div>
+        <div class="subtitle" id="systemStateText">Connecting…</div>
+      </div>
       <label class="toggle">
-        <input type="checkbox" id="systemToggle" checked>
+        <input type="checkbox" id="mainToggle" disabled>
         <span class="track"></span>
       </label>
     </div>
-  </div>
+    <hr>
 
-  <hr>
-
-  <!-- Account -->
-  <div class="row clickable" id="btnAccount">
-    <div class="account-avatar" id="avatarFallback">U</div>
-    <div class="row-text">
-      <div class="title" id="userName">Not logged in</div>
-      <div class="subtitle" id="userSub">Click to login</div>
+    <div class="row" id="btnAccount">
+      <div class="avatar" id="avatarBox"><span>?</span></div>
+      <div class="row-text">
+        <div class="title" id="userName">Not logged in</div>
+        <div class="subtitle" id="userSub">Click to sign in</div>
+      </div>
+      <span class="chevron" id="accountChevron" style="display:none">›</span>
     </div>
-    <div class="chevron"></div>
-  </div>
+    <hr>
 
-  <hr>
+    <div class="connected-only" id="connectedSection">
+      <div class="row" id="btnNetwork">
+        <div class="row-text"><div class="title">Devices</div></div>
+        <span class="chevron" id="networkChevron">›</span>
+      </div>
+      <div class="list-panel" id="networkList"></div>
 
-  <!-- Device Info -->
-  <div class="row">
-    <div class="row-text">
-      <div class="title" style="font-weight: 500;" id="deviceStatus">This Device: Loading...</div>
+      <div class="row" id="btnConnections">
+        <div class="row-text"><div class="title">Connections</div></div>
+        <span class="chevron" id="connChevron">›</span>
+      </div>
+      <div class="list-panel" id="connList"></div>
+      <hr>
+      <div class="row" id="btnSync">
+        <div class="row-text"><div class="title">Sync Keys</div></div>
+      </div>
+      <hr>
     </div>
-  </div>
 
-  <div class="row clickable" id="btnNetwork">
-    <div class="title" style="font-weight: 500;">Network Devices</div>
-    <div class="row-right" style="margin-left: auto;">
-      <div class="chevron"></div>
+    <div class="row" id="btnQuit">
+      <div class="row-text"><div class="title">Quit</div></div>
     </div>
-  </div>
-  <div id="networkList" class="list-panel"></div>
 
-  <div class="row clickable" id="btnConnections">
-    <div class="title" style="font-weight: 500;">Connections</div>
-    <div class="row-right" style="margin-left: auto;">
-      <div class="chevron"></div>
-    </div>
-  </div>
-  <div id="connList" class="list-panel"></div>
-  
-  <hr>
-
-  <!-- Settings / Commands -->
-  <div class="row clickable" id="btnSync">
-    <div class="title" style="font-weight: 500;">Sync Keys</div>
-  </div>
-  
-  <div class="row clickable">
-    <div class="title" style="font-weight: 500;">Settings...</div>
-    <div class="row-right" style="margin-left: auto;">
-      <span class="shortcut"> ,</span>
-    </div>
-  </div>
-
-  <hr>
-
-  <div class="row clickable" id="btnQuit">
-    <div class="title" style="font-weight: 500;">Quit</div>
-    <div class="row-right" style="margin-left: auto;">
-      <span class="shortcut"> Q</span>
+    <div id="account-modal">
+      <div id="account-modal-box">
+        <div class="modal-row" id="modalDashboard">Dashboard</div>
+        <div class="modal-row danger" id="modalLogout">Logout</div>
+      </div>
     </div>
   </div>
 
   <script>
-    document.addEventListener('DOMContentLoaded', () => {
-      window.onerror = function(msg) {
-        showError('Err: ' + msg);
-      };
-      window.onunhandledrejection = function(event) {
-        showError('Rej: ' + event.reason);
-      };
-
-      const t = window.__TAURI__;
-      const invoke = (t && (t.invoke || t.tauri?.invoke)) || null;
-
-      if (!invoke) {
-        document.getElementById('systemStateText').textContent = 'Tauri API Missing';
-        document.getElementById('systemStateText').style.color = '#FF453A';
-      }
-
-      function showError(msg) {
-        const bar = document.getElementById('error-bar');
-        if (!bar) return;
-        bar.textContent = msg;
-        bar.style.display = 'block';
-        setTimeout(() => { bar.style.display = 'none'; }, 6000);
-      }
-
+    (function() {
+      var sub = document.getElementById('systemStateText');
+      function el(id) { return document.getElementById(id); }
+      
       async function ipc(req) {
-        if (!invoke) return;
         try {
-          return await invoke('send_ipc_command', { req });
-        } catch (e) {
-          showError(String(e));
-          throw e;
-        }
+          var t = window.__TAURI__;
+          var fn = t.invoke || (t.tauri && t.tauri.invoke);
+          return await fn('send_ipc_command', { req: req });
+        } catch(e) { return null; }
       }
 
-      let loggedInUser = null;
-      let networkOpen = false;
-      let connOpen = false;
-      let oauthPollTimer = null;
+      var loggedIn = false;
+      var modalTimer = null;
+      var networkOpen = false;
+      var connOpen = false;
 
-      // ── Login button ───────────────────────────────────────────────────────────
-      document.getElementById('btnAccount').addEventListener('click', async () => {
-        if (loggedInUser) return;
+      function showModal() {
+        if (!loggedIn) return;
+        if (modalTimer) { clearTimeout(modalTimer); modalTimer = null; }
+        el('account-modal').style.display = 'block';
+      }
 
-        try {
-          document.getElementById('userSub').textContent = 'Opening browser…';
-          
-          // Tell csid to open the browser AND start the localhost callback server.
-          // csid now handles the PKCE challenge generation and token exchange internally.
-          const resp = await ipc('StartOAuthFlow');
-          if (resp && resp.Error) { showError('OAuth Error: ' + resp.Error); return; }
+      function hideModal() {
+        if (modalTimer) clearTimeout(modalTimer);
+        modalTimer = setTimeout(function() {
+          el('account-modal').style.display = 'none';
+        }, 300);
+      }
 
-          document.getElementById('userSub').textContent = 'Waiting for browser login…';
+      el('btnAccount').addEventListener('mouseenter', showModal);
+      el('btnAccount').addEventListener('mouseleave', hideModal);
+      el('account-modal').addEventListener('mouseenter', showModal);
+      el('account-modal').addEventListener('mouseleave', hideModal);
 
-          if (oauthPollTimer) clearInterval(oauthPollTimer);
-          oauthPollTimer = setInterval(async () => {
-            const s = await ipc('GetStatus').catch(() => null);
-            if (s && s.Status && s.Status.is_active) {
-              clearInterval(oauthPollTimer);
-              oauthPollTimer = null;
-              await updateStatus();
-            }
-          }, 2000);
+      el('btnAccount').addEventListener('mousedown', async function() {
+        if (loggedIn) return;
+        el('userSub').textContent = 'Opening browser…';
+        await ipc('StartOAuthFlow');
+      });
 
-        } catch (e) {
-          showError('Login Error: ' + e);
+      el('modalDashboard').addEventListener('mousedown', function() {
+        window.__TAURI__.shell.open('https://www.bluehashsecurity.com/dashboard/devices');
+        el('account-modal').style.display = 'none';
+      });
+
+      el('modalLogout').addEventListener('mousedown', async function() {
+        el('account-modal').style.display = 'none';
+        await ipc('Logout');
+        setLoggedOut();
+      });
+
+      function setLoggedOut() {
+        loggedIn = false;
+        el('connectedSection').style.display = 'none';
+        el('accountChevron').style.display = 'none';
+        el('userName').textContent = 'Not logged in';
+        el('userSub').textContent = 'Click to sign in';
+        el('avatarBox').innerHTML = '<span>?</span>';
+        sub.textContent = 'Disconnected';
+        el('mainToggle').checked = false;
+      }
+
+      el('btnQuit').addEventListener('mousedown', async function() {
+        // Mark disconnected in DB before exiting
+        await ipc('Logout');
+        await ipc('RotatePnk');
+        if (window.__TAURI__ && window.__TAURI__.process) {
+          window.__TAURI__.process.exit(0);
+        } else {
+          window.close();
         }
       });
 
-      document.getElementById('btnNetwork').addEventListener('click', async () => {
-        if (!loggedInUser) { showError('Login first'); return; }
+      el('btnNetwork').addEventListener('mousedown', async function() {
         networkOpen = !networkOpen;
-        const panel = document.getElementById('networkList');
+        var panel = el('networkList');
+        var chev = el('networkChevron');
         if (networkOpen) {
           panel.innerHTML = '<div class="list-item">Loading…</div>';
           panel.classList.add('open');
-          try {
-            const resp = await ipc('GetNetworkDevices');
-            if (resp?.NetworkDevices) {
-              const devs = resp.NetworkDevices;
-              panel.innerHTML = devs.length
-                ? devs.map(d => `<div class="list-item">${d.slice(0,28)}…</div>`).join('')
-                : '<div class="list-item">No devices</div>';
-            } else {
-              panel.innerHTML = `<div class="list-item">${resp?.Error ?? 'Error'}</div>`;
-            }
-          } catch (_) { panel.innerHTML = '<div class="list-item">Error</div>'; }
+          chev.classList.add('rotated');
+          var resp = await ipc('GetNetworkDevices');
+          if (resp && resp.NetworkDevices) {
+            var uniqueNames = [...new Set(resp.NetworkDevices)];
+            panel.innerHTML = uniqueNames.length
+              ? uniqueNames.map(name => `<div class="list-item">${name}</div>`).join('')
+              : '<div class="list-item">No other devices</div>';
+          } else {
+            panel.innerHTML = '<div class="list-item">Error fetching devices</div>';
+          }
         } else {
           panel.classList.remove('open');
+          chev.classList.remove('rotated');
         }
       });
 
-      document.getElementById('btnConnections').addEventListener('click', async () => {
-        if (!loggedInUser) { showError('Login first'); return; }
+      el('btnConnections').addEventListener('mousedown', async function() {
         connOpen = !connOpen;
-        const panel = document.getElementById('connList');
+        var panel = el('connList');
+        var chev = el('connChevron');
         if (connOpen) {
           panel.innerHTML = '<div class="list-item">Loading…</div>';
           panel.classList.add('open');
-          try {
-            const resp = await ipc('GetConnections');
-            if (resp?.Connections) {
-              const cs = resp.Connections;
-              panel.innerHTML = cs.length
-                ? cs.map(c => `<div class="list-item">${c}</div>`).join('')
-                : '<div class="list-item">No accepted connections</div>';
-            } else {
-              panel.innerHTML = `<div class="list-item">${resp?.Error ?? 'Error'}</div>`;
-            }
-          } catch (_) { panel.innerHTML = '<div class="list-item">Error</div>'; }
+          chev.classList.add('rotated');
+          var resp = await ipc('GetConnections');
+          if (resp && resp.Connections) {
+            panel.innerHTML = resp.Connections.length
+              ? resp.Connections.map(c => `<div class="list-item">${c}</div>`).join('')
+              : '<div class="list-item">No connections</div>';
+          }
         } else {
           panel.classList.remove('open');
+          chev.classList.remove('rotated');
         }
       });
 
-      document.getElementById('btnSync').addEventListener('click', async () => {
-        try {
-          const resp = await ipc('SyncKeys');
-          if (resp?.Error) showError('Sync: ' + resp.Error);
-          else {
-             const bar = document.getElementById('error-bar');
-             bar.textContent = 'Keys synced ';
-             bar.style.background = '#30D158';
-             bar.style.display = 'block';
-             setTimeout(() => { bar.style.display = 'none'; bar.style.background = '#FF453A'; }, 3000);
-          }
-        } catch (_) {}
-      });
-
-      document.getElementById('btnQuit').addEventListener('click', async () => {
-        await ipc('RotatePnk').catch(() => {});
-        window.__TAURI__?.process?.exit(0) ?? window.close();
-      });
-
-      async function updateStatus() {
-        try {
-          const resp = await ipc('GetStatus');
-          const s = resp?.Status;
-          if (!s) return;
-
-          const { hostname, is_active, state } = s;
-          
-          document.getElementById('deviceStatus').innerHTML =
-            `This Device: ${hostname}`;
-
-          document.getElementById('systemStateText').textContent =
-            state.includes('Ready') ? 'Connected' : 'Disconnected';
-
-          document.getElementById('systemToggle').checked =
-            !state.includes('Waiting');
-            
-          if (is_active && !loggedInUser) {
-            loggedInUser = 'active_session';
-            document.getElementById('userName').textContent = 'User Profile';
-            document.getElementById('userSub').textContent = 'Session Active';
-            document.getElementById('avatarFallback').textContent = 'U';
-            document.getElementById('avatarFallback').style.background = '#444';
-          }
-            
-        } catch (e) {
-          document.getElementById('deviceStatus').innerHTML =
-            `<span style="color:#FF453A">Daemon offline</span>`;
-          document.getElementById('systemStateText').textContent = 'Offline';
+      setInterval(async function() {
+        var resp = await ipc('GetStatus');
+        if (resp && resp.Status && resp.Status.is_active) {
+           var s = resp.Status;
+           loggedIn = true;
+           el('userName').textContent = s.email || 'User Profile';
+           el('userSub').textContent = 'Connected';
+           el('accountChevron').style.display = 'inline';
+           el('connectedSection').style.display = 'block';
+           sub.textContent = 'Connected';
+           el('mainToggle').checked = true;
+           
+           if (s.image_url) {
+             el('avatarBox').innerHTML = `<img src="${s.image_url}" alt="">`;
+           } else {
+             var initial = (s.email || 'U')[0].toUpperCase();
+             el('avatarBox').innerHTML = `<span>${initial}</span>`;
+           }
+        } else if (!loggedIn) {
+           setLoggedOut();
         }
-      }
+      }, 2000);
 
-      setInterval(updateStatus, 5000);
-      updateStatus();
-    });
+    })();
   </script>
 </body>
 </html>
