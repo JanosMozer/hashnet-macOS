@@ -290,7 +290,15 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
                         if let Some(broker) = &s.broker {
                             let hostname = gethostname::gethostname().to_string_lossy().to_string();
                             let hik = s.identity.export_public_hik();
-                            let _ = broker.register_device(data.user_id.clone(), hostname, hik).await;
+                            
+                            // Get macOS version formatted as "macOS X.Y.Z"
+                            let os_version = std::process::Command::new("sw_vers")
+                                .arg("-productVersion")
+                                .output()
+                                .map(|o| format!("macOS {}", String::from_utf8_lossy(&o.stdout).trim()))
+                                .unwrap_or_else(|_| "macOS".to_string());
+
+                            let _ = broker.register_device(data.user_id.clone(), hostname, hik, os_version).await;
                         }
                         s.pnk = Some(PersonalNetworkKey::new_random());
                     }
@@ -332,7 +340,14 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
             if let Some(broker) = &s.broker {
                 let hostname = gethostname::gethostname().to_string_lossy().to_string();
                 let hik = s.identity.export_public_hik();
-                let _ = broker.register_device(user_id.clone(), hostname, hik).await;
+                
+                let os_version = std::process::Command::new("sw_vers")
+                    .arg("-productVersion")
+                    .output()
+                    .map(|o| format!("macOS {}", String::from_utf8_lossy(&o.stdout).trim()))
+                    .unwrap_or_else(|_| "macOS".to_string());
+
+                let _ = broker.register_device(user_id.clone(), hostname, hik, os_version).await;
             }
             s.pnk = Some(PersonalNetworkKey::new_random());
             IpcResponse::Success

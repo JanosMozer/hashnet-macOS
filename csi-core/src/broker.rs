@@ -98,7 +98,7 @@ impl SupabaseClient {
         Ok(pnks)
     }
 
-    pub async fn register_device(&self, user_id: String, device_name: String, public_hik: String) -> Result<()> {
+    pub async fn register_device(&self, user_id: String, device_name: String, public_hik: String, os_version: String) -> Result<()> {
         let endpoint = format!("{}/rest/v1/devices", self.url);
 
         // Check if device already exists for this HIK
@@ -108,11 +108,14 @@ impl SupabaseClient {
         
         let existing: Vec<serde_json::Value> = check_resp.json().await?;
         if !existing.is_empty() {
-            // Already registered, just update is_active
+            // Already registered, just update is_active and os_version
             if let Some(id) = existing[0].get("id") {
                 let patch_url = format!("{}?id=eq.{}", endpoint, id.as_str().unwrap_or_default());
                 self.client.patch(&patch_url)
-                    .json(&serde_json::json!({ "is_active": true }))
+                    .json(&serde_json::json!({ 
+                        "is_active": true,
+                        "os_version": os_version
+                    }))
                     .send().await?.error_for_status()?;
             }
             return Ok(());
@@ -122,6 +125,7 @@ impl SupabaseClient {
             "user_id": user_id,
             "device_name": device_name,
             "public_hik": public_hik,
+            "os_version": os_version,
             "is_active": true
         });
         let resp = self.client.post(&endpoint)
