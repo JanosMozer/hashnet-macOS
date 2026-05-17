@@ -48,6 +48,10 @@
     .list-panel.open { max-height: 200px; overflow-y: auto; }
     .list-item { padding: 8px 40px; font-size: 12px; color: var(--text-sub); border-bottom: 1px solid rgba(255,255,255,0.03); }
     .list-item:last-child { border-bottom: none; }
+    .file-item { display: flex; align-items: center; justify-content: space-between; padding: 7px 14px 7px 40px; font-size: 12px; color: var(--text-sub); border-bottom: 1px solid rgba(255,255,255,0.03); }
+    .file-item:last-child { border-bottom: none; }
+    .file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 8px; }
+    .btn-open { background: var(--accent); color: #fff; border: none; border-radius: 4px; font-size: 11px; padding: 2px 8px; cursor: pointer; flex-shrink: 0; font-family: inherit; }
     .connected-only { display: none; }
     #account-modal { display: none; position: absolute; top: 86px; right: 14px; z-index: 200; }
     #account-modal-box { background: rgba(45,45,45,0.95); border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.6); overflow: hidden; min-width: 160px; backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
@@ -95,6 +99,12 @@
       </div>
       <div class="list-panel" id="connList"></div>
       <hr>
+      <div class="row" id="btnFiles">
+        <div class="row-text"><div class="title">Encrypted Files</div></div>
+        <span class="chevron" id="filesChevron">›</span>
+      </div>
+      <div class="list-panel" id="filesList"></div>
+
       <div class="row" id="btnSync">
         <div class="row-text"><div class="title">Sync Keys</div></div>
       </div>
@@ -130,6 +140,7 @@
       var modalTimer = null;
       var networkOpen = false;
       var connOpen = false;
+      var filesOpen = false;
 
       function showModal() {
         if (!loggedIn) return;
@@ -203,6 +214,43 @@
               : '<div class="list-item">No other devices</div>';
           } else {
             panel.innerHTML = '<div class="list-item">Error fetching devices</div>';
+          }
+        } else {
+          panel.classList.remove('open');
+          chev.classList.remove('rotated');
+        }
+      });
+
+      el('btnFiles').addEventListener('mousedown', async function() {
+        filesOpen = !filesOpen;
+        var panel = el('filesList');
+        var chev = el('filesChevron');
+        if (filesOpen) {
+          panel.innerHTML = '<div class="list-item">Loading…</div>';
+          panel.classList.add('open');
+          chev.classList.add('rotated');
+          var resp = await ipc('GetFiles');
+          if (resp && resp.Files) {
+            if (resp.Files.length === 0) {
+              panel.innerHTML = '<div class="list-item">No encrypted files</div>';
+            } else {
+              panel.innerHTML = resp.Files.map(function(f) {
+                var enc = f.enc_path.replace(/"/g, '&quot;');
+                return '<div class="file-item"><span class="file-name" title="'+enc+'">'+f.original_name+'</span><button class="btn-open" data-enc="'+enc+'">Open</button></div>';
+              }).join('');
+              panel.querySelectorAll('.btn-open').forEach(function(btn) {
+                btn.addEventListener('mousedown', async function(e) {
+                  e.stopPropagation();
+                  btn.disabled = true;
+                  btn.textContent = '…';
+                  var r = await ipc({ OpenFile: { enc_path: btn.dataset.enc } });
+                  if (r && r.Error) { btn.textContent = 'Err'; setTimeout(function(){ btn.textContent='Open'; btn.disabled=false; }, 2000); }
+                  else { btn.textContent = 'Open'; btn.disabled = false; }
+                });
+              });
+            }
+          } else {
+            panel.innerHTML = '<div class="list-item">Error</div>';
           }
         } else {
           panel.classList.remove('open');

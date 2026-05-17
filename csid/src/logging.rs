@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-pub fn init_logging() -> anyhow::Result<()> {
+pub fn init_logging() -> anyhow::Result<tracing_appender::non_blocking::WorkerGuard> {
     let log_dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("Library/Logs/Hashnet");
@@ -9,7 +9,7 @@ pub fn init_logging() -> anyhow::Result<()> {
     std::fs::create_dir_all(&log_dir)?;
 
     let file_appender = tracing_appender::rolling::daily(&log_dir, "csid.log");
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     let fmt_layer = fmt::layer()
         .with_writer(non_blocking)
@@ -25,5 +25,5 @@ pub fn init_logging() -> anyhow::Result<()> {
         .with(fmt_layer)
         .init();
 
-    Ok(())
+    Ok(guard)
 }
