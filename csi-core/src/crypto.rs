@@ -3,11 +3,15 @@ use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
     ChaCha20Poly1305, Nonce,
 };
-use keyring::Entry;
 use rand::rngs::OsRng as RandOsRng;
 use thiserror::Error;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
+
+use crate::keychain::{load_device_secret, store_device_secret};
+
+const HIK_ACCOUNT: &str = "hardware_identity_key";
+const HIK_VERSION_ACCOUNT: &str = "hardware_identity_version";
 
 #[derive(Error, Debug)]
 pub enum CryptoError {
@@ -21,48 +25,72 @@ pub enum CryptoError {
     DecryptionFailed,
 }
 
+impl From<anyhow::Error> for CryptoError {
+    fn from(e: anyhow::Error) -> Self {
+        CryptoError::Keychain(e.to_string())
+    }
+}
+
+#[derive(Clone)]
 pub struct HardwareIdentity {
     secret: StaticSecret,
     public: PublicKey,
+    pub version: u32,
 }
 
 impl HardwareIdentity {
-    const SERVICE_NAME: &'static str = "com.csi.tray-macos";
-    const ACCOUNT_NAME: &'static str = "hardware_identity";
-
     pub fn load_or_generate() -> Result<Self, CryptoError> {
-        let entry = Entry::new(Self::SERVICE_NAME, Self::ACCOUNT_NAME)
-            .map_err(|e| CryptoError::Keychain(e.to_string()))?;
-
-        match entry.get_password() {
-            Ok(b64_secret) => {
-                let bytes = Base64.decode(b64_secret)
-                    .map_err(|e| CryptoError::KeyFormat(e.to_string()))?;
-                
+        // Load HIK from device-bound Keychain or generate a new one if not present.
+        match load_device_secret(HIK_ACCOUNT) {
+            Ok(bytes) => {
                 if bytes.len() != 32 {
-                    return Err(CryptoError::KeyFormat("Invalid key length".into()));
+                    return Err(CryptoError::KeyFormat("Invalid HIK length in keychain".into()));
                 }
-                
+                let version = Self::load_version();
                 let mut secret_bytes = [0u8; 32];
                 secret_bytes.copy_from_slice(&bytes);
-                
+                let mut tmp = bytes;
+                tmp.zeroize();
+
                 let secret = StaticSecret::from(secret_bytes);
                 let public = PublicKey::from(&secret);
-                
-                Ok(Self { secret, public })
+                Ok(Self { secret, public, version })
             }
-            Err(_) => {
-                // Generate new key
-                let secret = StaticSecret::random_from_rng(RandOsRng);
-                let public = PublicKey::from(&secret);
-                
-                let b64_secret = Base64.encode(secret.to_bytes());
-                entry.set_password(&b64_secret)
-                    .map_err(|e| CryptoError::Keychain(e.to_string()))?;
-                
-                Ok(Self { secret, public })
-            }
+            Err(_) => Self::generate_and_store(0),
         }
+    }
+
+    fn generate_and_store(version: u32) -> Result<Self, CryptoError> {
+        let secret = StaticSecret::random_from_rng(RandOsRng);
+        let public = PublicKey::from(&secret);
+
+        store_device_secret(HIK_ACCOUNT, secret.as_bytes())
+            .map_err(|e| CryptoError::Keychain(e.to_string()))?;
+        Self::store_version(version)
+            .map_err(|e| CryptoError::Keychain(e.to_string()))?;
+
+        Ok(Self { secret, public, version })
+    }
+
+    fn load_version() -> u32 {
+        load_device_secret(HIK_VERSION_ACCOUNT)
+            .ok()
+            .and_then(|b| b.get(..4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]])))
+            .unwrap_or(0)
+    }
+
+    fn store_version(v: u32) -> anyhow::Result<()> {
+        store_device_secret(HIK_VERSION_ACCOUNT, &v.to_le_bytes())
+    }
+
+    pub fn rotate(&mut self) -> Result<PublicKey, CryptoError> {
+        let old_public = self.public;
+        let new_version = self.version.saturating_add(1);
+        let new_identity = Self::generate_and_store(new_version)?;
+        self.secret = new_identity.secret;
+        self.public = new_identity.public;
+        self.version = new_version;
+        Ok(old_public)
     }
 
     pub fn export_public_hik(&self) -> String {
@@ -72,7 +100,7 @@ impl HardwareIdentity {
     pub fn public_key(&self) -> &PublicKey {
         &self.public
     }
-    
+
     pub fn secret(&self) -> &StaticSecret {
         &self.secret
     }
@@ -92,14 +120,13 @@ impl PersonalNetworkKey {
     pub fn wrap(&self, target_public: &PublicKey, sender_secret: &StaticSecret) -> Result<Vec<u8>, CryptoError> {
         let shared_secret = sender_secret.diffie_hellman(target_public);
         let cipher = ChaCha20Poly1305::new(shared_secret.as_bytes().into());
-        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng); // 12-bytes
-        
+        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+
         let mut ciphertext = cipher.encrypt(&nonce, self.0.as_ref())
             .map_err(|_| CryptoError::EncryptionFailed)?;
-            
+
         let mut result = nonce.to_vec();
         result.append(&mut ciphertext);
-        
         Ok(result)
     }
 
@@ -107,23 +134,26 @@ impl PersonalNetworkKey {
         if wrapped.len() < 12 {
             return Err(CryptoError::DecryptionFailed);
         }
-        
+
         let shared_secret = recipient_secret.diffie_hellman(sender_public);
         let cipher = ChaCha20Poly1305::new(shared_secret.as_bytes().into());
-        
+
         let nonce = Nonce::from_slice(&wrapped[..12]);
         let ciphertext = &wrapped[12..];
-        
+
         let plaintext = cipher.decrypt(nonce, ciphertext)
             .map_err(|_| CryptoError::DecryptionFailed)?;
-            
+
         if plaintext.len() != 32 {
             return Err(CryptoError::DecryptionFailed);
         }
-        
+
         let mut key = [0u8; 32];
         key.copy_from_slice(&plaintext);
-        
         Ok(Self(key))
+    }
+
+    pub fn as_base64(&self) -> String {
+        Base64.encode(self.0)
     }
 }
