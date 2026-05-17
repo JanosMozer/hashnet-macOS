@@ -25,13 +25,14 @@
       border: 1px solid rgba(255,255,255,0.1);
       display: flex; flex-direction: column;
       box-shadow: 0 10px 30px rgba(0,0,0,0.5); position: relative;
+      backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px);
     }
     #error-bar { display: none; font-size: 11px; padding: 4px 10px; background: #FF453A; color: #fff; word-break: break-all; }
-    .row { display: flex; align-items: center; padding: 9px 14px; cursor: pointer; min-height: 42px; }
+    .row { display: flex; align-items: center; padding: 9px 14px; cursor: pointer; min-height: 42px; transition: background 0.15s ease; }
     .row:hover { background: var(--bg-hover); }
     .row-text { display: flex; flex-direction: column; flex-grow: 1; }
-    .title { font-size: 13px; color: var(--text-main); }
-    .subtitle { font-size: 12px; color: var(--text-sub); margin-top: 2px; }
+    .title { font-size: 13px; font-weight: 500; color: var(--text-main); letter-spacing: -0.3px; }
+    .subtitle { font-size: 12px; color: var(--text-sub); margin-top: 2px; font-weight: 400; }
     hr { border: none; border-top: 1px solid var(--border); margin: 2px 0; }
     .toggle { position: relative; display: inline-block; width: 40px; height: 24px; }
     .toggle input { opacity: 0; width: 0; height: 0; }
@@ -43,15 +44,15 @@
     .avatar img { width: 100%; height: 100%; object-fit: cover; }
     .chevron { color: var(--text-sub); font-size: 16px; transition: transform 0.2s; }
     .chevron.rotated { transform: rotate(90deg); }
-    .list-panel { max-height: 0; overflow: hidden; transition: max-height 0.2s ease; }
-    .list-panel.open { max-height: 160px; overflow-y: auto; }
+    .list-panel { max-height: 0; overflow: hidden; transition: max-height 0.25s cubic-bezier(0.4, 0, 0.2, 1); }
+    .list-panel.open { max-height: 200px; overflow-y: auto; }
     .list-item { padding: 8px 40px; font-size: 12px; color: var(--text-sub); border-bottom: 1px solid rgba(255,255,255,0.03); }
     .list-item:last-child { border-bottom: none; }
     .connected-only { display: none; }
     #account-modal { display: none; position: absolute; top: 86px; right: 14px; z-index: 200; }
-    #account-modal-box { background: rgba(45,45,45,0.99); border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.6); overflow: hidden; min-width: 160px; }
-    .modal-row { padding: 10px 16px; font-size: 13px; color: var(--text-main); cursor: pointer; }
-    .modal-row:hover { background: var(--bg-hover); }
+    #account-modal-box { background: rgba(45,45,45,0.95); border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.6); overflow: hidden; min-width: 160px; backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
+    .modal-row { padding: 10px 16px; font-size: 13px; color: var(--text-main); cursor: pointer; transition: background 0.15s ease; font-weight: 500; }
+    .modal-row:hover { background: rgba(255,255,255,0.08); }
     .modal-row.danger { color: #FF453A; }
   </style>
 </head>
@@ -116,7 +117,7 @@
     (function() {
       var sub = document.getElementById('systemStateText');
       function el(id) { return document.getElementById(id); }
-      
+
       async function ipc(req) {
         try {
           var t = window.__TAURI__;
@@ -177,7 +178,6 @@
       }
 
       el('btnQuit').addEventListener('mousedown', async function() {
-        // Mark disconnected in DB before exiting
         await ipc('Logout');
         await ipc('RotatePnk');
         if (window.__TAURI__ && window.__TAURI__.process) {

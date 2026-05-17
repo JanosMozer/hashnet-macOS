@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.hashnet.csid</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>CSID_BINARY_PATH</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>HOME_DIR/Library/Logs/Hashnet/csid.log</string>
+    <key>StandardErrorPath</key>
+    <string>HOME_DIR/Library/Logs/Hashnet/csid.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>RUST_LOG</key>
+        <string>csid=info,csi_core=info,warn</string>
+    </dict>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

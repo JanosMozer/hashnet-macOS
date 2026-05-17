@@ -6,6 +6,7 @@ pub enum IpcRequest {
     SyncKeys,
     AcceptInvite { target_user_id: String },
     RotatePnk,
+    RotateHik,
     Login { user_id: String },
     StartOAuthFlow,
     GetNetworkDevices,
