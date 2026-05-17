@@ -119,3 +119,109 @@ pub fn delete_device_secret(account: &str) -> Result<()> {
     }
     Ok(())
 }
+
+/// Store PersonalNetworkKey (32-byte key material) in Keychain
+pub fn store_pnk(key_bytes: &[u8; 32]) -> Result<()> {
+    let _ = delete_pnk();
+
+    let query: Vec<(CFString, CFType)> = vec![
+        (
+            unsafe { CFString::wrap_under_get_rule(kSecClass) },
+            unsafe { CFString::wrap_under_get_rule(kSecClassGenericPassword).into_CFType() },
+        ),
+        (
+            unsafe { CFString::wrap_under_get_rule(kSecAttrService) },
+            CFString::from(SERVICE).into_CFType(),
+        ),
+        (
+            unsafe { CFString::wrap_under_get_rule(kSecAttrAccount) },
+            CFString::from("pnk").into_CFType(),
+        ),
+        (
+            unsafe { CFString::wrap_under_get_rule(kSecAttrAccessible) },
+            unsafe { CFString::wrap_under_get_rule(kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly).into_CFType() },
+        ),
+        (
+            unsafe { CFString::wrap_under_get_rule(kSecValueData) },
+            CFData::from_buffer(key_bytes).into_CFType(),
+        ),
+    ];
+
+    let dict = CFDictionary::from_CFType_pairs(&query);
+    let status = unsafe { SecItemAdd(dict.as_concrete_TypeRef(), std::ptr::null_mut()) };
+    if status != 0 {
+        bail!("SecItemAdd failed for PNK with OSStatus {}", status);
+    }
+    Ok(())
+}
+
+/// Load PersonalNetworkKey (32-byte key material) from Keychain
+pub fn load_pnk() -> Result<[u8; 32]> {
+    let query: Vec<(CFString, CFType)> = vec![
+        (
+            unsafe { CFString::wrap_under_get_rule(kSecClass) },
+            unsafe { CFString::wrap_under_get_rule(kSecClassGenericPassword).into_CFType() },
+        ),
+        (
+            unsafe { CFString::wrap_under_get_rule(kSecAttrService) },
+            CFString::from(SERVICE).into_CFType(),
+        ),
+        (
+            unsafe { CFString::wrap_under_get_rule(kSecAttrAccount) },
+            CFString::from("pnk").into_CFType(),
+        ),
+        (
+            unsafe { CFString::wrap_under_get_rule(kSecMatchLimit) },
+            CFNumber::from(1_i32).into_CFType(),
+        ),
+        (
+            unsafe { CFString::wrap_under_get_rule(kSecReturnData) },
+            CFBoolean::from(true).into_CFType(),
+        ),
+    ];
+
+    let dict = CFDictionary::from_CFType_pairs(&query);
+    let mut result: CFTypeRef = std::ptr::null();
+    let status = unsafe { SecItemCopyMatching(dict.as_concrete_TypeRef(), &mut result) };
+
+    if status == -25300 {
+        bail!("PNK not found in keychain");
+    }
+    if status != 0 {
+        bail!("SecItemCopyMatching failed for PNK with OSStatus {}", status);
+    }
+
+    let data: CFData = unsafe { CFData::wrap_under_create_rule(result as CFDataRef) };
+    let bytes = data.bytes();
+    if bytes.len() != 32 {
+        bail!("PNK must be 32 bytes, got {}", bytes.len());
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(bytes);
+    Ok(arr)
+}
+
+/// Delete PersonalNetworkKey from Keychain
+pub fn delete_pnk() -> Result<()> {
+    let query: Vec<(CFString, CFType)> = vec![
+        (
+            unsafe { CFString::wrap_under_get_rule(kSecClass) },
+            unsafe { CFString::wrap_under_get_rule(kSecClassGenericPassword).into_CFType() },
+        ),
+        (
+            unsafe { CFString::wrap_under_get_rule(kSecAttrService) },
+            CFString::from(SERVICE).into_CFType(),
+        ),
+        (
+            unsafe { CFString::wrap_under_get_rule(kSecAttrAccount) },
+            CFString::from("pnk").into_CFType(),
+        ),
+    ];
+
+    let dict = CFDictionary::from_CFType_pairs(&query);
+    let status = unsafe { SecItemDelete(dict.as_concrete_TypeRef()) };
+    if status != 0 && status != -25300 {
+        bail!("SecItemDelete failed for PNK with OSStatus {}", status);
+    }
+    Ok(())
+}

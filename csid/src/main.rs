@@ -12,6 +12,7 @@ use rand::RngCore;
 use rand::rngs::OsRng;
 use serde::Deserialize;
 use tracing::{error, info};
+use chacha20poly1305::{ChaCha20Poly1305, aead::{Aead, AeadCore, KeyInit}};
 
 use csi_core::broker::SupabaseClient;
 use csi_core::crypto::{HardwareIdentity, PersonalNetworkKey};
@@ -19,12 +20,54 @@ use csi_ipc::{IpcRequest, IpcResponse};
 use x25519_dalek::PublicKey as X25519PublicKey;
 
 mod logging;
+mod watcher;
+
+use std::collections::{HashSet, VecDeque};
+use serde::{Serialize};
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct ManifestEntry {
+    pub original_name: String,
+    pub original_path: String,
+    pub inode: u64,
+    pub sha256_original: String,
+    pub encrypted_at: u64,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct Manifest {
+    pub version: u32,
+    pub files: std::collections::HashMap<String, ManifestEntry>,
+}
 
 const OAUTH_CALLBACK_PORT: u16 = 14555;
 const AUTH_BASE_URL: &str = "https://bluehashsecurity.com/api/auth/authorize";
 const TOKEN_URL: &str = "https://bluehashsecurity.com/api/auth/token";
 const CLIENT_ID: &str = "bluehash-desktop";
 const REDIRECT_URI: &str = "http://127.0.0.1:14555";
+
+fn get_hashnet_dir() -> Result<std::path::PathBuf> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+    let hashnet_dir = home.join("Hashnet");
+    std::fs::create_dir_all(&hashnet_dir)?;
+    std::fs::create_dir_all(hashnet_dir.join("encrypted"))?;
+    std::fs::create_dir_all(hashnet_dir.join(".hashnet"))?;
+    let manifest_path = hashnet_dir.join(".hashnet/manifest.json");
+    if !manifest_path.exists() {
+        let blank = Manifest { version: 2, files: std::collections::HashMap::new() };
+        std::fs::write(&manifest_path, serde_json::to_string_pretty(&blank)?)?;
+    }
+    Ok(hashnet_dir)
+}
+
+fn load_manifest(hashnet_dir: &std::path::Path) -> Manifest {
+    let path = hashnet_dir.join(".hashnet/manifest.json");
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| Manifest { version: 2, files: std::collections::HashMap::new() })
+}
 
 struct DaemonState {
     identity: HardwareIdentity,
@@ -36,23 +79,56 @@ struct DaemonState {
     oauth_listening: bool,
     device_id: Option<uuid::Uuid>,
     key_version: u32,
+    manifest: Manifest,
+    in_flight: HashSet<std::path::PathBuf>,
+    pending_encrypt: VecDeque<std::path::PathBuf>,
 }
 
 #[derive(Deserialize, Debug)]
 struct TokenResponse {
+    #[serde(default)]
+    access_token: String,
+    #[serde(default)]
+    id_token: String,
+    // Custom server may return these directly
+    #[serde(default)]
     user_id: String,
+    #[serde(default)]
     email: Option<String>,
+    #[serde(default)]
     image_url: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct IdTokenClaims {
+    sub: String,
+    email: Option<String>,
+    picture: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct UserInfoResponse {
+    #[serde(alias = "id", alias = "user_id")]
+    sub: Option<String>,
+    email: Option<String>,
+    #[serde(alias = "image_url", alias = "avatar_url", alias = "profile_image_url")]
+    picture: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
-    if let Err(e) = logging::init_logging() {
-        eprintln!("Failed to initialize logging: {}", e);
-        return Err(e);
-    }
+    let _log_guard = match logging::init_logging() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("Failed to initialize logging: {}", e);
+            return Err(e);
+        }
+    };
     info!("Starting csid daemon");
+
+    let hashnet_dir = get_hashnet_dir()?;
+    let manifest = load_manifest(&hashnet_dir);
 
     let identity = HardwareIdentity::load_or_generate()
         .map_err(|e| anyhow::anyhow!("Failed to load hardware identity: {}", e))?;
@@ -75,7 +151,13 @@ async fn main() -> Result<()> {
         oauth_listening: false,
         device_id: None,
         key_version: 1,
+        manifest,
+        in_flight: HashSet::new(),
+        pending_encrypt: VecDeque::new(),
     }));
+
+    let _watcher = watcher::start(hashnet_dir.join("encrypted"), state.clone())
+        .map_err(|e| anyhow::anyhow!("Failed to start file watcher: {}", e))?;
 
     // Spawn background heartbeat loop (Phase 2)
     let state_heartbeat = state.clone();
@@ -221,15 +303,19 @@ fn generate_pkce() -> (String, String) {
     (verifier, challenge)
 }
 
-async fn wait_for_oauth_code(code_verifier: String) -> Result<TokenResponse> {
-    use tokio::net::TcpListener;
+fn decode_jwt_claims(id_token: &str) -> Result<IdTokenClaims> {
+    let parts: Vec<&str> = id_token.split('.').collect();
+    if parts.len() != 3 {
+        return Err(anyhow::anyhow!("Invalid JWT format"));
+    }
+    let payload = parts[1];
+    let padding = (4 - (payload.len() % 4)) % 4;
+    let decoded = Base64Url.decode(format!("{}{}", payload, "=".repeat(padding)))?;
+    Ok(serde_json::from_slice(&decoded)?)
+}
+
+async fn wait_for_oauth_code(listener: tokio::net::TcpListener, code_verifier: String) -> Result<(TokenResponse, IdTokenClaims)> {
     use tokio::time::{timeout, Duration};
-
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT))
-        .await
-        .context("Failed to bind OAuth callback port. Kill any stale process on :14555 and retry.")?;
-
-    info!("Waiting for OAuth callback on http://127.0.0.1:{}", OAUTH_CALLBACK_PORT);
 
     let (stream, _) = timeout(Duration::from_secs(300), listener.accept())
         .await
@@ -278,7 +364,37 @@ async fn wait_for_oauth_code(code_verifier: String) -> Result<TokenResponse> {
         .error_for_status()?;
 
     let token_data: TokenResponse = resp.json().await?;
-    info!("Received token data: {:?}", token_data);
+    info!("Raw token response: user_id={:?} email={:?}", token_data.user_id, token_data.email);
+
+    let claims = if !token_data.id_token.is_empty() {
+        decode_jwt_claims(&token_data.id_token)?
+    } else if !token_data.user_id.is_empty() {
+        IdTokenClaims {
+            sub: token_data.user_id.clone(),
+            email: token_data.email.clone(),
+            picture: token_data.image_url.clone(),
+        }
+    } else {
+        // Fallback: fetch from userinfo endpoint using access_token
+        let user_url = format!("{}/me", TOKEN_URL.trim_end_matches("/token"));
+        let ui_resp = reqwest::Client::new()
+            .get(&user_url)
+            .bearer_auth(&token_data.access_token)
+            .send()
+            .await;
+        match ui_resp {
+            Ok(r) if r.status().is_success() => {
+                let ui: UserInfoResponse = r.json().await.unwrap_or(UserInfoResponse { sub: None, email: None, picture: None });
+                IdTokenClaims {
+                    sub: ui.sub.unwrap_or_default(),
+                    email: ui.email,
+                    picture: ui.picture,
+                }
+            }
+            _ => return Err(anyhow::anyhow!("Could not extract user identity from token response")),
+        }
+    };
+    info!("OAuth user: {} email={:?}", claims.sub, claims.email);
 
     let inner_stream = stream.into_inner();
     let mut inner_stream = inner_stream;
@@ -310,7 +426,7 @@ async fn wait_for_oauth_code(code_verifier: String) -> Result<TokenResponse> {
     );
     inner_stream.write_all(response.as_bytes()).await?;
 
-    Ok(token_data)
+    Ok((token_data, claims))
 }
 
 fn parse_public_hik(b64: &str) -> anyhow::Result<X25519PublicKey> {
@@ -321,6 +437,16 @@ fn parse_public_hik(b64: &str) -> anyhow::Result<X25519PublicKey> {
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&bytes);
     Ok(X25519PublicKey::from(arr))
+}
+
+async fn drain_pending(state: &Arc<RwLock<DaemonState>>) {
+    let pending: Vec<std::path::PathBuf> = {
+        let mut s = state.write().await;
+        s.pending_encrypt.drain(..).collect()
+    };
+    for path in pending {
+        watcher::encrypt_file_from_watcher_pub(path, state).await;
+    }
 }
 
 async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> IpcResponse {
@@ -357,6 +483,19 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
             let state_clone = state.clone();
             let (verifier, challenge) = generate_pkce();
 
+            // Bind listener BEFORE opening browser to avoid race condition
+            let listener = match tokio::net::TcpListener::bind(
+                format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT)
+            ).await {
+                Ok(l) => l,
+                Err(e) => {
+                    let mut s = state_clone.write().await;
+                    s.oauth_listening = false;
+                    return IpcResponse::Error(format!("Port 14555 in use: {}", e));
+                }
+            };
+            info!("OAuth listener bound on :14555");
+
             let url = format!(
                 "{}?client_id={}&response_type=code&redirect_uri={}&code_challenge={}&code_challenge_method=S256",
                 AUTH_BASE_URL,
@@ -372,14 +511,14 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
             }
 
             tokio::spawn(async move {
-                match wait_for_oauth_code(verifier).await {
-                    Ok(data) => {
+                match wait_for_oauth_code(listener, verifier).await {
+                    Ok((_token_data, claims)) => {
                         let (broker, key_version) = {
                             let mut s = state_clone.write().await;
                             s.oauth_listening = false;
-                            s.logged_in_user = Some(data.user_id.clone());
-                            s.user_email = data.email;
-                            s.user_image = data.image_url;
+                            s.logged_in_user = Some(claims.sub.clone());
+                            s.user_email = claims.email.clone();
+                            s.user_image = claims.picture.clone();
                             (s.broker.clone(), s.key_version)
                         };
 
@@ -398,17 +537,53 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
                                 .unwrap_or_else(|_| "macOS".to_string());
 
                             // Register device and get its UUID
-                            match broker.register_device(data.user_id.clone(), hostname, hik, os_version).await {
+                            match broker.register_device(claims.sub.clone(), hostname, hik, os_version).await {
                                 Ok(device_id) => {
-                                    // Check if newer keys are available for sync
-                                    if let Ok(needs_sync) = broker.check_key_sync_needed(device_id, key_version).await {
-                                        if needs_sync {
-                                            error!("Key sync needed on login");
-                                            // TODO: Implement actual key sync
+                                    // Try to load PNK from local Keychain first (persisted from previous session)
+                                    let pnk_result = if let Ok(key_bytes) = csi_core::keychain::load_pnk() {
+                                        info!("Loaded PNK from Keychain");
+                                        Ok(PersonalNetworkKey(key_bytes))
+                                    } else {
+                                        // Try to fetch from broker
+                                        match broker.fetch_wrapped_pnks_for_device(device_id).await {
+                                            Ok(wrapped_pnks) if !wrapped_pnks.is_empty() => {
+                                                let latest = &wrapped_pnks[0];
+                                                let hik_id = { let s = state_clone.read().await; s.identity.clone() };
+                                                PersonalNetworkKey::unwrap(
+                                                    Base64.decode(&latest.wrapped_pnk).unwrap_or_default().as_ref(),
+                                                    hik_id.public_key(),
+                                                    hik_id.secret(),
+                                                ).map(|pnk| {
+                                                    let _ = csi_core::keychain::store_pnk(&pnk.0);
+                                                    info!("PNK synced from broker (version {})", latest.version);
+                                                    pnk
+                                                })
+                                            }
+                                            _ => {
+                                                info!("No PNK in Keychain or broker, generating new");
+                                                let new_pnk = PersonalNetworkKey::new_random();
+                                                let _ = csi_core::keychain::store_pnk(&new_pnk.0);
+                                                let hik_secret = { let s = state_clone.read().await; s.identity.secret().clone() };
+                                                if let Ok(devices) = broker.get_devices_for_key_distribution(&claims.sub).await {
+                                                    for device in &devices {
+                                                        if let Ok(target_pub) = parse_public_hik(&device.public_hik) {
+                                                            if let Ok(wrapped) = new_pnk.wrap(&target_pub, &hik_secret) {
+                                                                let b64 = Base64.encode(&wrapped);
+                                                                let _ = broker.push_wrapped_pnk(device.id, claims.sub.parse().unwrap_or_default(), b64, 1).await;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                Ok(new_pnk)
+                                            }
                                         }
+                                    };
+
+                                    if let Ok(pnk) = pnk_result {
+                                        let mut s = state_clone.write().await;
+                                        s.pnk = Some(pnk);
+                                        s.device_id = Some(device_id);
                                     }
-                                    let mut s = state_clone.write().await;
-                                    s.device_id = Some(device_id);
                                 }
                                 Err(e) => {
                                     error!("Failed to register device: {}", e);
@@ -416,8 +591,7 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
                             }
                         }
 
-                        let mut s = state_clone.write().await;
-                        s.pnk = Some(PersonalNetworkKey::new_random());
+                        drain_pending(&state_clone).await;
                     }
                     Err(e) => {
                         error!("OAuth error: {}", e);
@@ -639,15 +813,51 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
                 // Register device and get its UUID
                 match broker.register_device(user_id.clone(), hostname, hik, os_version).await {
                     Ok(device_id) => {
-                        // Check if newer keys are available for sync
-                        if let Ok(needs_sync) = broker.check_key_sync_needed(device_id, key_version).await {
-                            if needs_sync {
-                                error!("Key sync needed on login");
-                                // TODO: Implement actual key sync
+                        // Try to load PNK from local Keychain first (persisted from previous session)
+                        let pnk_result = if let Ok(key_bytes) = csi_core::keychain::load_pnk() {
+                            info!("Loaded PNK from Keychain");
+                            Ok(PersonalNetworkKey(key_bytes))
+                        } else {
+                            // Try to fetch from broker
+                            match broker.fetch_wrapped_pnks_for_device(device_id).await {
+                                Ok(wrapped_pnks) if !wrapped_pnks.is_empty() => {
+                                    let latest = &wrapped_pnks[0];
+                                    let hik_id = { let s = state.read().await; s.identity.clone() };
+                                    PersonalNetworkKey::unwrap(
+                                        Base64.decode(&latest.wrapped_pnk).unwrap_or_default().as_ref(),
+                                        hik_id.public_key(),
+                                        hik_id.secret(),
+                                    ).map(|pnk| {
+                                        let _ = csi_core::keychain::store_pnk(&pnk.0);
+                                        info!("PNK synced from broker (version {})", latest.version);
+                                        pnk
+                                    })
+                                }
+                                _ => {
+                                    info!("No PNK in Keychain or broker, generating new");
+                                    let new_pnk = PersonalNetworkKey::new_random();
+                                    let _ = csi_core::keychain::store_pnk(&new_pnk.0);
+                                    let hik_secret = { let s = state.read().await; s.identity.secret().clone() };
+                                    if let Ok(devices) = broker.get_devices_for_key_distribution(&user_id).await {
+                                        for device in &devices {
+                                            if let Ok(target_pub) = parse_public_hik(&device.public_hik) {
+                                                if let Ok(wrapped) = new_pnk.wrap(&target_pub, &hik_secret) {
+                                                    let b64 = Base64.encode(&wrapped);
+                                                    let _ = broker.push_wrapped_pnk(device.id, user_id.parse().unwrap_or_default(), b64, 1).await;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Ok(new_pnk)
+                                }
                             }
+                        };
+
+                        if let Ok(pnk) = pnk_result {
+                            let mut s = state.write().await;
+                            s.pnk = Some(pnk);
+                            s.device_id = Some(device_id);
                         }
-                        let mut s = state.write().await;
-                        s.device_id = Some(device_id);
                     }
                     Err(e) => {
                         error!("Failed to register device: {}", e);
@@ -655,10 +865,7 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
                 }
             }
 
-            {
-                let mut s = state.write().await;
-                s.pnk = Some(PersonalNetworkKey::new_random());
-            }
+            drain_pending(&state).await;
             IpcResponse::Success
         }
         IpcRequest::GetNetworkDevices => {
@@ -690,6 +897,53 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
             s.user_image = None;
             s.pnk = None;
             s.device_id = None;
+            IpcResponse::Success
+        }
+        IpcRequest::GetFiles => {
+            let s = state.read().await;
+            let files: Vec<csi_ipc::FileInfo> = s.manifest.files.iter().map(|(enc_path, entry)| {
+                csi_ipc::FileInfo {
+                    enc_path: enc_path.clone(),
+                    original_name: entry.original_name.clone(),
+                    size_bytes: entry.size_bytes,
+                    encrypted_at: entry.encrypted_at,
+                }
+            }).collect();
+            IpcResponse::Files(files)
+        }
+        IpcRequest::OpenFile { enc_path } => {
+            let pnk_bytes = {
+                let s = state.read().await;
+                s.pnk.as_ref().map(|p| p.0)
+            };
+            let Some(key_bytes) = pnk_bytes else {
+                return IpcResponse::Error("Not logged in — cannot decrypt".into());
+            };
+            let enc = std::path::PathBuf::from(&enc_path);
+            let original_name = {
+                let s = state.read().await;
+                s.manifest.files.get(&enc_path)
+                    .map(|e| e.original_name.clone())
+                    .unwrap_or_else(|| enc.file_stem().unwrap_or_default().to_string_lossy().to_string())
+            };
+            match watcher::do_decrypt(&enc, &key_bytes, &original_name).await {
+                Ok(tmp_path) => {
+                    if let Err(e) = open::that(&tmp_path) {
+                        error!("Failed to open decrypted file: {}", e);
+                        return IpcResponse::Error(format!("Decrypted but could not open: {}", e));
+                    }
+                    IpcResponse::Success
+                }
+                Err(e) => {
+                    error!("Decryption failed for {:?}: {}", enc_path, e);
+                    IpcResponse::Error(format!("Decryption failed: {}", e))
+                }
+            }
+        }
+        IpcRequest::EncryptFile { file_path } => {
+            // Watcher handles in-place encryption; this is a manual trigger
+            let path = std::path::PathBuf::from(&file_path);
+            watcher::encrypt_file_from_watcher_pub(path, state).await;
             IpcResponse::Success
         }
     }
