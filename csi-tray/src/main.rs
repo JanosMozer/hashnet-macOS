@@ -8,9 +8,7 @@ use tokio::net::UnixStream;
 
 #[tauri::command]
 async fn send_ipc_command(req: IpcRequest) -> Result<IpcResponse, String> {
-    println!("Received IPC command request from JS: {:?}", req);
     let res = send_ipc_command_inner(req).await.map_err(|e| e.to_string());
-    println!("IPC command result: {:?}", res);
     res
 }
 
@@ -37,19 +35,18 @@ fn main() {
     let system_tray = SystemTray::new();
 
     tauri::Builder::default()
-        .setup(|app| {
+        .setup(|_app| {
             tauri::async_runtime::spawn(async move {
-                // Retry until csid is ready (it may not have started yet)
                 for attempt in 1..=20 {
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                     match send_ipc_command_inner(csi_ipc::IpcRequest::GetStatus).await {
                         Ok(resp) => {
-                            println!("Startup IPC connected (attempt {}): {:?}", attempt, resp);
+                            eprintln!("Startup IPC connected (attempt {}): {:?}", attempt, resp);
                             break;
                         }
                         Err(e) => {
                             if attempt == 20 {
-                                println!("Startup IPC failed after 20 attempts: {}", e);
+                                eprintln!("Startup IPC failed after 20 attempts: {}", e);
                             }
                         }
                     }
@@ -80,7 +77,6 @@ fn main() {
             tauri::WindowEvent::Focused(is_focused) => {
                 if !is_focused {
                     let window = event.window().clone();
-                    // Small delay so mousedown/click handlers fire before the window hides
                     tauri::async_runtime::spawn(async move {
                         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
                         let _ = window.hide();

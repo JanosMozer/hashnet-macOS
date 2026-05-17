@@ -1,13 +1,17 @@
 [package]
 name = "csid"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
 anyhow = "1.0.102"
 base64 = "0.22.1"
+chacha20poly1305 = "0.10.1"
+notify = "6"
+walkdir = "2"
 csi-core = { version = "0.1.0", path = "../csi-core" }
 csi-ipc = { version = "0.1.0", path = "../csi-ipc" }
+dirs = "5.0"
 dotenvy = "0.15.7"
 gethostname = "1.1.0"
 open = "5.3.5"
@@ -19,6 +23,8 @@ sha2 = "0.11.0"
 tokio = { version = "1.52.3", features = ["full"] }
 tokio-util = "0.7.18"
 tracing = "0.1.44"
-tracing-subscriber = "0.3.23"
+tracing-subscriber = { version = "0.3.23", features = ["fmt", "env-filter"] }
+tracing-appender = "0.2"
 urlencoding = "2.1.3"
 uuid = { version = "1.23.1", features = ["v4"] }
+x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }

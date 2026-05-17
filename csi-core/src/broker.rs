@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use reqwest::{header, Client};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use chrono::Utc;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WrappedPnk {
@@ -12,6 +13,13 @@ pub struct WrappedPnk {
     pub created_at: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct DeviceKeyInfo {
+    pub id: Uuid,
+    pub public_hik: String,
+}
+
+#[derive(Clone)]
 pub struct SupabaseClient {
     client: Client,
     url: String,
@@ -58,8 +66,27 @@ impl SupabaseClient {
         }
 
         let records: Vec<DeviceRecord> = response.json().await?;
-
         Ok(records.into_iter().map(|r| r.device_name).collect())
+    }
+
+    /// Returns all device UUIDs and public HIKs for a user — used when
+    /// re-wrapping keys during PNK or HIK rotation.
+    pub async fn get_devices_for_key_distribution(&self, user_id: &str) -> Result<Vec<DeviceKeyInfo>> {
+        let endpoint = format!("{}/rest/v1/devices", self.url);
+
+        let response = self
+            .client
+            .get(&endpoint)
+            .query(&[
+                ("user_id", format!("eq.{}", user_id)),
+                ("select", "id,public_hik".to_string()),
+            ])
+            .send()
+            .await?
+            .error_for_status()?;
+
+        let records: Vec<DeviceKeyInfo> = response.json().await?;
+        Ok(records)
     }
 
     pub async fn push_wrapped_pnk(
@@ -98,68 +125,164 @@ impl SupabaseClient {
         Ok(pnks)
     }
 
-    pub async fn register_device(&self, user_id: String, device_name: String, public_hik: String) -> Result<()> {
+    pub async fn register_device(&self, user_id: String, device_name: String, public_hik: String, os_version: String) -> Result<Uuid> {
         let endpoint = format!("{}/rest/v1/devices", self.url);
 
-        // Check if device already exists for this HIK
         let check_resp = self.client.get(&endpoint)
             .query(&[("public_hik", format!("eq.{}", public_hik))])
             .send().await?.error_for_status()?;
-        
-        let existing: Vec<serde_json::Value> = check_resp.json().await?;
+
+        #[derive(Deserialize)]
+        struct DeviceRecord {
+            id: Uuid,
+        }
+
+        let existing: Vec<DeviceRecord> = check_resp.json().await?;
         if !existing.is_empty() {
-            // Already registered, just update is_active
-            if let Some(id) = existing[0].get("id") {
-                let patch_url = format!("{}?id=eq.{}", endpoint, id.as_str().unwrap_or_default());
-                self.client.patch(&patch_url)
-                    .json(&serde_json::json!({ "is_active": true }))
-                    .send().await?.error_for_status()?;
-            }
-            return Ok(());
+            let device_id = existing[0].id;
+            let patch_url = format!("{}?id=eq.{}", endpoint, device_id);
+            self.client.patch(&patch_url)
+                .json(&serde_json::json!({
+                    "is_active": true,
+                    "os_version": os_version,
+                    "last_seen_at": Utc::now().to_rfc3339(),
+                    "disconnected_at": serde_json::Value::Null
+                }))
+                .send().await?.error_for_status()?;
+            return Ok(device_id);
         }
 
         let payload = serde_json::json!({
             "user_id": user_id,
             "device_name": device_name,
             "public_hik": public_hik,
+            "os_version": os_version,
             "is_active": true
         });
         let resp = self.client.post(&endpoint)
-            .header("Prefer", "return=minimal")
+            .header("Prefer", "return=representation")
             .json(&payload).send().await?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             anyhow::bail!("register_device failed {}: {}", status, body);
         }
-        Ok(())
+
+        let records: Vec<DeviceRecord> = resp.json().await?;
+        let device_id = records.first()
+            .ok_or_else(|| anyhow::anyhow!("No device returned from register_device"))?
+            .id;
+        Ok(device_id)
     }
 
     pub async fn set_device_status(&self, public_hik: String, is_active: bool) -> Result<()> {
         let endpoint = format!("{}/rest/v1/devices", self.url);
         let patch_url = format!("{}?public_hik=eq.{}", endpoint, public_hik);
-        
+
+        let payload = if is_active {
+            serde_json::json!({
+                "is_active": true,
+                "last_seen_at": Utc::now().to_rfc3339(),
+                "disconnected_at": serde_json::Value::Null
+            })
+        } else {
+            serde_json::json!({
+                "is_active": false,
+                "disconnected_at": Utc::now().to_rfc3339()
+            })
+        };
+
         self.client.patch(&patch_url)
-            .json(&serde_json::json!({ "is_active": is_active }))
+            .json(&payload)
+            .send().await?.error_for_status()?;
+        Ok(())
+    }
+
+    pub async fn update_last_seen(&self, public_hik: String) -> Result<()> {
+        let endpoint = format!("{}/rest/v1/devices", self.url);
+        let patch_url = format!("{}?public_hik=eq.{}", endpoint, public_hik);
+
+        self.client.patch(&patch_url)
+            .json(&serde_json::json!({
+                "last_seen_at": Utc::now().to_rfc3339()
+            }))
             .send().await?.error_for_status()?;
         Ok(())
     }
 
     pub async fn get_connections(&self, user_id: String) -> Result<Vec<String>> {
         let endpoint = format!("{}/rest/v1/connections", self.url);
-        // PostgREST or() filter syntax
         let or_filter = format!("(initiator_user_id.eq.{},target_user_id.eq.{})", user_id, user_id);
+
         let response = self.client.get(&endpoint)
             .query(&[
-                ("or", or_filter.as_str()),
-                ("status", "eq.accepted"),
-                ("select", "id"),
+                ("or", or_filter),
+                ("status", "eq.accepted".to_string()),
+                ("select", "id".to_string()),
             ])
             .send().await?.error_for_status()?;
 
         #[derive(Deserialize)]
-        struct ConnRecord { id: Uuid }
+        struct ConnRecord {
+            id: Uuid
+        }
         let records: Vec<ConnRecord> = response.json().await?;
         Ok(records.into_iter().map(|r| r.id.to_string()).collect())
+    }
+
+    pub async fn get_latest_key_version(&self, device_id: Uuid) -> Result<Option<u32>> {
+        let endpoint = format!("{}/rest/v1/key_broker", self.url);
+
+        let response = self.client.get(&endpoint)
+            .query(&[
+                ("target_device_id", format!("eq.{}", device_id)),
+                ("select", "version".to_string()),
+                ("order", "version.desc".to_string()),
+                ("limit", "1".to_string()),
+            ])
+            .send().await?.error_for_status()?;
+
+        #[derive(Deserialize)]
+        struct VersionRecord {
+            version: u32,
+        }
+
+        let records: Vec<VersionRecord> = response.json().await?;
+        Ok(records.first().map(|r| r.version))
+    }
+
+    pub async fn check_key_sync_needed(&self, device_id: Uuid, local_version: u32) -> Result<bool> {
+        match self.get_latest_key_version(device_id).await? {
+            Some(latest) => Ok(latest > local_version),
+            None => Ok(false),
+        }
+    }
+
+    pub async fn update_device_hik(&self, device_id: Uuid, new_public_hik: &str, hik_version: u32) -> Result<()> {
+        let endpoint = format!("{}/rest/v1/devices", self.url);
+        let patch_url = format!("{}?id=eq.{}", endpoint, device_id);
+
+        self.client.patch(&patch_url)
+            .json(&serde_json::json!({
+                "public_hik": new_public_hik,
+                "hik_version": hik_version,
+                "last_seen_at": Utc::now().to_rfc3339()
+            }))
+            .send().await?.error_for_status()?;
+        Ok(())
+    }
+
+    pub async fn fetch_wrapped_pnks_for_device(&self, device_id: Uuid) -> Result<Vec<WrappedPnk>> {
+        let endpoint = format!("{}/rest/v1/key_broker", self.url);
+
+        let response = self.client.get(&endpoint)
+            .query(&[
+                ("target_device_id", format!("eq.{}", device_id)),
+                ("order", "version.desc".to_string()),
+            ])
+            .send().await?.error_for_status()?;
+
+        let pnks: Vec<WrappedPnk> = response.json().await?;
+        Ok(pnks)
     }
 }

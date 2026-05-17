@@ -25,13 +25,14 @@
       border: 1px solid rgba(255,255,255,0.1);
       display: flex; flex-direction: column;
       box-shadow: 0 10px 30px rgba(0,0,0,0.5); position: relative;
+      backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px);
     }
     #error-bar { display: none; font-size: 11px; padding: 4px 10px; background: #FF453A; color: #fff; word-break: break-all; }
-    .row { display: flex; align-items: center; padding: 9px 14px; cursor: pointer; min-height: 42px; }
+    .row { display: flex; align-items: center; padding: 9px 14px; cursor: pointer; min-height: 42px; transition: background 0.15s ease; }
     .row:hover { background: var(--bg-hover); }
     .row-text { display: flex; flex-direction: column; flex-grow: 1; }
-    .title { font-size: 13px; color: var(--text-main); }
-    .subtitle { font-size: 12px; color: var(--text-sub); margin-top: 2px; }
+    .title { font-size: 13px; font-weight: 500; color: var(--text-main); letter-spacing: -0.3px; }
+    .subtitle { font-size: 12px; color: var(--text-sub); margin-top: 2px; font-weight: 400; }
     hr { border: none; border-top: 1px solid var(--border); margin: 2px 0; }
     .toggle { position: relative; display: inline-block; width: 40px; height: 24px; }
     .toggle input { opacity: 0; width: 0; height: 0; }
@@ -43,15 +44,19 @@
     .avatar img { width: 100%; height: 100%; object-fit: cover; }
     .chevron { color: var(--text-sub); font-size: 16px; transition: transform 0.2s; }
     .chevron.rotated { transform: rotate(90deg); }
-    .list-panel { max-height: 0; overflow: hidden; transition: max-height 0.2s ease; }
-    .list-panel.open { max-height: 160px; overflow-y: auto; }
+    .list-panel { max-height: 0; overflow: hidden; transition: max-height 0.25s cubic-bezier(0.4, 0, 0.2, 1); }
+    .list-panel.open { max-height: 200px; overflow-y: auto; }
     .list-item { padding: 8px 40px; font-size: 12px; color: var(--text-sub); border-bottom: 1px solid rgba(255,255,255,0.03); }
     .list-item:last-child { border-bottom: none; }
+    .file-item { display: flex; align-items: center; justify-content: space-between; padding: 7px 14px 7px 40px; font-size: 12px; color: var(--text-sub); border-bottom: 1px solid rgba(255,255,255,0.03); }
+    .file-item:last-child { border-bottom: none; }
+    .file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 8px; }
+    .btn-open { background: var(--accent); color: #fff; border: none; border-radius: 4px; font-size: 11px; padding: 2px 8px; cursor: pointer; flex-shrink: 0; font-family: inherit; }
     .connected-only { display: none; }
     #account-modal { display: none; position: absolute; top: 86px; right: 14px; z-index: 200; }
-    #account-modal-box { background: rgba(45,45,45,0.99); border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.6); overflow: hidden; min-width: 160px; }
-    .modal-row { padding: 10px 16px; font-size: 13px; color: var(--text-main); cursor: pointer; }
-    .modal-row:hover { background: var(--bg-hover); }
+    #account-modal-box { background: rgba(45,45,45,0.95); border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.6); overflow: hidden; min-width: 160px; backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
+    .modal-row { padding: 10px 16px; font-size: 13px; color: var(--text-main); cursor: pointer; transition: background 0.15s ease; font-weight: 500; }
+    .modal-row:hover { background: rgba(255,255,255,0.08); }
     .modal-row.danger { color: #FF453A; }
   </style>
 </head>
@@ -94,6 +99,12 @@
       </div>
       <div class="list-panel" id="connList"></div>
       <hr>
+      <div class="row" id="btnFiles">
+        <div class="row-text"><div class="title">Encrypted Files</div></div>
+        <span class="chevron" id="filesChevron">›</span>
+      </div>
+      <div class="list-panel" id="filesList"></div>
+
       <div class="row" id="btnSync">
         <div class="row-text"><div class="title">Sync Keys</div></div>
       </div>
@@ -116,7 +127,7 @@
     (function() {
       var sub = document.getElementById('systemStateText');
       function el(id) { return document.getElementById(id); }
-      
+
       async function ipc(req) {
         try {
           var t = window.__TAURI__;
@@ -129,6 +140,7 @@
       var modalTimer = null;
       var networkOpen = false;
       var connOpen = false;
+      var filesOpen = false;
 
       function showModal() {
         if (!loggedIn) return;
@@ -177,7 +189,6 @@
       }
 
       el('btnQuit').addEventListener('mousedown', async function() {
-        // Mark disconnected in DB before exiting
         await ipc('Logout');
         await ipc('RotatePnk');
         if (window.__TAURI__ && window.__TAURI__.process) {
@@ -203,6 +214,43 @@
               : '<div class="list-item">No other devices</div>';
           } else {
             panel.innerHTML = '<div class="list-item">Error fetching devices</div>';
+          }
+        } else {
+          panel.classList.remove('open');
+          chev.classList.remove('rotated');
+        }
+      });
+
+      el('btnFiles').addEventListener('mousedown', async function() {
+        filesOpen = !filesOpen;
+        var panel = el('filesList');
+        var chev = el('filesChevron');
+        if (filesOpen) {
+          panel.innerHTML = '<div class="list-item">Loading…</div>';
+          panel.classList.add('open');
+          chev.classList.add('rotated');
+          var resp = await ipc('GetFiles');
+          if (resp && resp.Files) {
+            if (resp.Files.length === 0) {
+              panel.innerHTML = '<div class="list-item">No encrypted files</div>';
+            } else {
+              panel.innerHTML = resp.Files.map(function(f) {
+                var enc = f.enc_path.replace(/"/g, '&quot;');
+                return '<div class="file-item"><span class="file-name" title="'+enc+'">'+f.original_name+'</span><button class="btn-open" data-enc="'+enc+'">Open</button></div>';
+              }).join('');
+              panel.querySelectorAll('.btn-open').forEach(function(btn) {
+                btn.addEventListener('mousedown', async function(e) {
+                  e.stopPropagation();
+                  btn.disabled = true;
+                  btn.textContent = '…';
+                  var r = await ipc({ OpenFile: { enc_path: btn.dataset.enc } });
+                  if (r && r.Error) { btn.textContent = 'Err'; setTimeout(function(){ btn.textContent='Open'; btn.disabled=false; }, 2000); }
+                  else { btn.textContent = 'Open'; btn.disabled = false; }
+                });
+              });
+            }
+          } else {
+            panel.innerHTML = '<div class="list-item">Error</div>';
           }
         } else {
           panel.classList.remove('open');
