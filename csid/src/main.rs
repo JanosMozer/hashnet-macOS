@@ -12,7 +12,6 @@ use rand::RngCore;
 use rand::rngs::OsRng;
 use serde::Deserialize;
 use tracing::{error, info};
-use chacha20poly1305::{ChaCha20Poly1305, aead::{Aead, AeadCore, KeyInit}};
 
 use csi_core::broker::SupabaseClient;
 use csi_core::crypto::{HardwareIdentity, PersonalNetworkKey};
@@ -23,7 +22,6 @@ mod logging;
 mod watcher;
 
 use std::collections::{HashSet, VecDeque};
-use serde::{Serialize};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct ManifestEntry {
@@ -539,13 +537,13 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
             tokio::spawn(async move {
                 match wait_for_oauth_code(listener, verifier).await {
                     Ok((_token_data, claims)) => {
-                        let (broker, key_version) = {
+                        let broker = {
                             let mut s = state_clone.write().await;
                             s.oauth_listening = false;
                             s.logged_in_user = Some(claims.sub.clone());
                             s.user_email = claims.email.clone();
                             s.user_image = claims.picture.clone();
-                            (s.broker.clone(), s.key_version)
+                            s.broker.clone()
                         };
 
                         if let Some(broker) = broker {
@@ -737,6 +735,11 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
                         if push_errors > 0 {
                             return IpcResponse::Error(format!("PNK rotated but {} device(s) failed", push_errors));
                         }
+                        // Persist new PNK to Keychain
+                        if let Err(e) = csi_core::keychain::store_pnk(&new_pnk.0) {
+                            error!("Failed to persist PNK to Keychain: {}", e);
+                            return IpcResponse::Error("Failed to save PNK to Keychain".into());
+                        }
                         let mut s = state.write().await;
                         s.pnk = Some(new_pnk);
                         s.key_version = new_version;
@@ -816,11 +819,139 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
                 IpcResponse::Error("Not logged in".into())
             }
         }
+        IpcRequest::RotateKeys => {
+            // Atomic key rotation: new HIK + new PNK + re-encrypt all files
+            let (broker, user_id, device_id, old_pnk_bytes) = {
+                let s = state.read().await;
+                (
+                    s.broker.clone(),
+                    s.logged_in_user.clone(),
+                    s.device_id,
+                    s.pnk.as_ref().map(|p| p.0),
+                )
+            };
+
+            let broker = match broker {
+                Some(b) => b,
+                None => return IpcResponse::Error("Not logged in".into()),
+            };
+
+            let uid = match user_id {
+                Some(u) => u,
+                None => return IpcResponse::Error("Not logged in".into()),
+            };
+
+            let device_id = match device_id {
+                Some(d) => d,
+                None => return IpcResponse::Error("No device registered".into()),
+            };
+
+            let old_pnk = match old_pnk_bytes {
+                Some(p) => p,
+                None => return IpcResponse::Error("PNK not available".into()),
+            };
+
+            // 1. Generate new HIK and new PNK in memory (don't persist yet)
+            let new_pnk = PersonalNetworkKey::new_random();
+
+            // 1b. Create manifest for rotation (cloned from state)
+            let manifest_for_rotation = {
+                let s = state.read().await;
+                Arc::new(tokio::sync::Mutex::new(s.manifest.clone()))
+            };
+
+            // 2. Re-encrypt all .enc files with new PNK (safe two-phase)
+            let files_count = match watcher::re_encrypt_all(
+                manifest_for_rotation.clone(),
+                &old_pnk,
+                &new_pnk.0,
+            ).await {
+                Ok(count) => {
+                    info!("Successfully re-encrypted {} files", count);
+                    // Merge re-encrypted entries back to state (keeps any files added during rotation)
+                    {
+                        let mut s = state.write().await;
+                        let rotated = manifest_for_rotation.lock().await;
+                        for (enc_path, entry) in &rotated.files {
+                            s.manifest.files.insert(enc_path.clone(), entry.clone());
+                        }
+                        let _ = watcher::save_manifest(&s.manifest);
+                    }
+                    count
+                }
+                Err(e) => {
+                    error!("Re-encryption failed: {}", e);
+                    return IpcResponse::Error(format!("Re-encryption failed: {}", e));
+                }
+            };
+
+            // 3. Rotate HIK (generates and stores new X25519 key to Keychain)
+            let (new_hik_pub, new_hik_secret, new_hik_version) = {
+                let mut s = state.write().await;
+                match s.identity.rotate() {
+                    Ok(_old_pub) => {
+                        let pub_key = *s.identity.public_key();
+                        let sec_key = s.identity.secret().clone();
+                        let ver = s.identity.version;
+                        (pub_key, sec_key, ver)
+                    }
+                    Err(e) => {
+                        error!("HIK rotation failed: {}", e);
+                        return IpcResponse::Error(format!("HIK rotation failed: {}", e));
+                    }
+                }
+            };
+
+            // 4. Persist new PNK to Keychain
+            if let Err(e) = csi_core::keychain::store_pnk(&new_pnk.0) {
+                error!("Failed to persist new PNK to Keychain: {}", e);
+                return IpcResponse::Error("Failed to save PNK to Keychain".into());
+            }
+
+            // 5. Update daemon state
+            {
+                let mut s = state.write().await;
+                s.pnk = Some(PersonalNetworkKey(new_pnk.0));
+                s.key_version = s.key_version.saturating_add(1);
+            }
+
+            let new_key_version = {
+                let s = state.read().await;
+                s.key_version
+            };
+
+            // 6. Update device's public HIK in database
+            let new_hik_b64 = Base64.encode(new_hik_pub.as_bytes());
+            if let Err(e) = broker.update_device_hik(device_id, &new_hik_b64, new_hik_version).await {
+                error!("Failed to update HIK in DB: {}", e);
+                return IpcResponse::Error("DB update for HIK failed".into());
+            }
+
+            // 7. Wrap new PNK for all user devices and push to key_broker
+            if let Ok(devices) = broker.get_devices_for_key_distribution(&uid).await {
+                for device in &devices {
+                    if let Ok(target_pub) = parse_public_hik(&device.public_hik) {
+                        if let Ok(wrapped) = new_pnk.wrap(&target_pub, &new_hik_secret) {
+                            let b64 = Base64.encode(&wrapped);
+                            let _ = broker.push_wrapped_pnk(
+                                device.id,
+                                uid.parse().unwrap_or_default(),
+                                b64,
+                                new_key_version,
+                            ).await;
+                        }
+                    }
+                }
+            }
+
+            info!("Key rotation complete: HIK rotated, PNK rotated, {} files re-encrypted", files_count);
+            IpcResponse::Success
+        }
         IpcRequest::Login { user_id } => {
-            let (broker, key_version) = {
+            let broker = {
                 let mut s = state.write().await;
                 s.logged_in_user = Some(user_id.clone());
-                (s.broker.clone(), s.key_version)
+                s.broker.clone()
             };
 
             if let Some(broker) = broker {
