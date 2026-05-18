@@ -15,6 +15,7 @@ pub enum IpcRequest {
     AcceptInvite { target_user_id: String },
     RotatePnk,
     RotateHik,
+    RotateKeys,
     Login { user_id: String },
     StartOAuthFlow,
     GetNetworkDevices,

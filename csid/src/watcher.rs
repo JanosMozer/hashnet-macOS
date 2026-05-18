@@ -63,7 +63,7 @@ pub fn start(
 async fn handle_event(event: Event, state: &Arc<RwLock<super::DaemonState>>) {
     let all_paths = event.paths.clone();
     let paths: Vec<PathBuf> = event.paths.iter()
-        .filter(|p| !is_enc(p) && !is_tmp(p) && !is_manifest(p))
+        .filter(|p| !is_enc(p) && !is_tmp(p) && !is_new(p) && !is_manifest(p))
         .cloned()
         .collect();
 
@@ -275,8 +275,151 @@ fn is_tmp(p: &Path) -> bool {
         .map_or(false, |n| n.starts_with('.') && n.ends_with(".tmp"))
 }
 
+fn is_new(p: &Path) -> bool {
+    p.extension().map_or(false, |e| e == "new")
+}
+
 fn is_manifest(p: &Path) -> bool {
     p.ends_with(".hashnet/manifest.json")
+}
+
+/// Re-encrypt all .enc files with a new PNK. Safe two-phase write: .enc.new files first,
+/// then atomic rename if all succeed. Returns count of files re-encrypted or error.
+pub async fn re_encrypt_all(
+    manifest: Arc<tokio::sync::Mutex<Manifest>>,
+    old_pnk: &[u8; 32],
+    new_pnk: &[u8; 32],
+) -> Result<usize, String> {
+    // 1. Snapshot manifest entries
+    let snapshot = {
+        let m = manifest.lock().await;
+        m.files.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>()
+    };
+
+    info!("re_encrypt_all: starting re-encryption of {} files", snapshot.len());
+
+    let mut new_files = Vec::new();
+
+    // 2. Write all .enc.new temp files
+    for (enc_path_str, _entry) in &snapshot {
+        let enc_path = std::path::PathBuf::from(enc_path_str);
+        let new_enc_path = enc_path.with_extension("enc.new");
+
+        // Read encrypted file
+        let data = match tokio::fs::read(&enc_path).await {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // File deleted after snapshot — skip
+                info!("  File {} no longer exists, skipping", enc_path_str);
+                continue;
+            }
+            Err(e) => {
+                let err_msg = format!("Failed to read {}: {}", enc_path_str, e);
+                error!("{}", err_msg);
+                // Clean up any .new files written so far
+                for (_, new_path) in &new_files {
+                    let _ = tokio::fs::remove_file(new_path).await;
+                }
+                return Err(err_msg);
+            }
+        };
+
+        // Decrypt with old PNK
+        if data.len() < 12 {
+            let err_msg = format!("File {} too short for nonce", enc_path_str);
+            error!("{}", err_msg);
+            for (_, new_path) in &new_files {
+                let _ = tokio::fs::remove_file(new_path).await;
+            }
+            return Err(err_msg);
+        }
+
+        let (nonce_bytes, ciphertext) = data.split_at(12);
+        let mut nonce_arr = [0u8; 12];
+        nonce_arr.copy_from_slice(nonce_bytes);
+        let nonce = chacha20poly1305::Nonce::from(nonce_arr);
+
+        let cipher_old = ChaCha20Poly1305::new(old_pnk.into());
+        let plaintext = match cipher_old.decrypt(&nonce, ciphertext) {
+            Ok(p) => p,
+            Err(_) => {
+                let err_msg = format!("Decryption failed for {} (wrong key or corrupted)", enc_path_str);
+                error!("{}", err_msg);
+                for (_, new_path) in &new_files {
+                    let _ = tokio::fs::remove_file(new_path).await;
+                }
+                return Err(err_msg);
+            }
+        };
+
+        // Re-encrypt with new PNK
+        let cipher_new = ChaCha20Poly1305::new(new_pnk.into());
+        let new_nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let encrypted = match cipher_new.encrypt(&new_nonce, plaintext.as_ref()) {
+            Ok(e) => e,
+            Err(_) => {
+                let err_msg = format!("Re-encryption failed for {}", enc_path_str);
+                error!("{}", err_msg);
+                for (_, new_path) in &new_files {
+                    let _ = tokio::fs::remove_file(new_path).await;
+                }
+                return Err(err_msg);
+            }
+        };
+
+        // Write new .enc.new file
+        let mut enc_data = new_nonce.to_vec();
+        enc_data.extend(encrypted);
+
+        if let Err(e) = tokio::fs::write(&new_enc_path, &enc_data).await {
+            let err_msg = format!("Failed to write {}: {}", new_enc_path.display(), e);
+            error!("{}", err_msg);
+            for (_, new_path) in &new_files {
+                let _ = tokio::fs::remove_file(new_path).await;
+            }
+            return Err(err_msg);
+        }
+
+        new_files.push((enc_path.clone(), new_enc_path));
+    }
+
+    // 3. All .new files written successfully — now commit the swap
+    for (old_path, new_path) in &new_files {
+        if let Err(e) = tokio::fs::rename(new_path, old_path).await {
+            let err_msg = format!("Failed to rename {} -> {}: {}", new_path.display(), old_path.display(), e);
+            error!("{}", err_msg);
+            // Best effort cleanup of remaining .new files
+            for (_, np) in &new_files {
+                let _ = tokio::fs::remove_file(np).await;
+            }
+            return Err(err_msg);
+        }
+    }
+
+    // 4. Update manifest with new timestamps (plaintext content unchanged, so SHA256 unchanged)
+    {
+        let mut m = manifest.lock().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        for (enc_path_str, entry) in m.files.iter_mut() {
+            if snapshot.iter().any(|(k, _)| k == enc_path_str) {
+                entry.encrypted_at = now;
+            }
+        }
+    }
+
+    // 5. Save manifest
+    let manifest_locked = manifest.lock().await;
+    if let Err(e) = save_manifest(&*manifest_locked) {
+        error!("Failed to save manifest after re-encryption: {}", e);
+        return Err(format!("Failed to save manifest: {}", e));
+    }
+
+    info!("re_encrypt_all: successfully re-encrypted {} files", new_files.len());
+    Ok(new_files.len())
 }
 
 pub fn save_manifest(manifest: &Manifest) -> Result<()> {

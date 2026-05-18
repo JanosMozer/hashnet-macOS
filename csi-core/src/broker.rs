@@ -261,12 +261,14 @@ impl SupabaseClient {
     pub async fn update_device_hik(&self, device_id: Uuid, new_public_hik: &str, hik_version: u32) -> Result<()> {
         let endpoint = format!("{}/rest/v1/devices", self.url);
         let patch_url = format!("{}?id=eq.{}", endpoint, device_id);
+        let now = Utc::now().to_rfc3339();
 
         self.client.patch(&patch_url)
             .json(&serde_json::json!({
                 "public_hik": new_public_hik,
                 "hik_version": hik_version,
-                "last_seen_at": Utc::now().to_rfc3339()
+                "last_seen_at": now.clone(),
+                "last_key_rotation": now
             }))
             .send().await?.error_for_status()?;
         Ok(())
