@@ -2,3 +2,4 @@
 .agent/
 target/
 build/
+.claude/
