@@ -236,27 +236,53 @@ async fn main() -> Result<()> {
 
     let listener = UnixListener::bind(socket_path).context("Failed to bind socket")?;
 
-    // Set permissions to 0600 (owner read/write only)
     std::fs::set_permissions(socket_path, Permissions::from_mode(0o600))
         .context("Failed to set socket permissions")?;
-
-    
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut sigint = signal(SignalKind::interrupt()).map_err(|e| anyhow::anyhow!("Failed to set SIGINT handler: {}", e))?;
+    let mut sigterm = signal(SignalKind::terminate()).map_err(|e| anyhow::anyhow!("Failed to set SIGTERM handler: {}", e))?;
 
     loop {
-        match listener.accept().await {
-            Ok((stream, _)) => {
-                let state_clone = state.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, state_clone).await {
-                        error!("Client error: {}", e);
+        tokio::select! {
+            accept_res = listener.accept() => {
+                match accept_res {
+                    Ok((stream, _)) => {
+                        let state_clone = state.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_client(stream, state_clone).await {
+                                error!("Client error: {}", e);
+                            }
+                        });
                     }
-                });
+                    Err(e) => {
+                        error!("Failed to accept connection: {}", e);
+                    }
+                }
             }
-            Err(e) => {
-                error!("Failed to accept connection: {}", e);
+            _ = sigint.recv() => {
+                info!("SIGINT received. Shutting down gracefully...");
+                break;
+            }
+            _ = sigterm.recv() => {
+                info!("SIGTERM received. Shutting down gracefully...");
+                break;
             }
         }
     }
+
+    // Graceful cleanup:
+    let (broker, hik) = {
+        let s = state.read().await;
+        (s.broker.clone(), s.identity.export_public_hik())
+    };
+    if let Some(client) = broker {
+        info!("Setting device active status to false in Supabase...");
+        if let Err(e) = client.set_device_status(hik, false).await {
+            error!("Failed to mark device as inactive on exit: {}", e);
+        }
+    }
+
+    Ok(())
 }
 
 async fn handle_client(mut stream: UnixStream, state: Arc<RwLock<DaemonState>>) -> Result<()> {
