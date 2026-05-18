@@ -40,6 +40,7 @@ pub struct HardwareIdentity {
 
 impl HardwareIdentity {
     pub fn load_or_generate() -> Result<Self, CryptoError> {
+        // Loads the HardwareIdentity from the secure Keychain or generates and persists a new one.
         // Load HIK from device-bound Keychain or generate a new one if not present.
         match load_device_secret(HIK_ACCOUNT) {
             Ok(bytes) => {
@@ -61,6 +62,7 @@ impl HardwareIdentity {
     }
 
     fn generate_and_store(version: u32) -> Result<Self, CryptoError> {
+        // Generates a random X25519 keypair and persists both the secret and version in the Keychain.
         let secret = StaticSecret::random_from_rng(RandOsRng);
         let public = PublicKey::from(&secret);
 
@@ -73,6 +75,7 @@ impl HardwareIdentity {
     }
 
     fn load_version() -> u32 {
+        // Loads the version tag of the current HardwareIdentity from the secure Keychain.
         load_device_secret(HIK_VERSION_ACCOUNT)
             .ok()
             .and_then(|b| b.get(..4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]])))
@@ -80,10 +83,12 @@ impl HardwareIdentity {
     }
 
     fn store_version(v: u32) -> anyhow::Result<()> {
+        // Persists the version tag of the current HardwareIdentity in the secure Keychain.
         store_device_secret(HIK_VERSION_ACCOUNT, &v.to_le_bytes())
     }
 
     pub fn rotate(&mut self) -> Result<PublicKey, CryptoError> {
+        // Atomically generates a new HardwareIdentity keypair, increments version, and rotates Keychain storage.
         let old_public = self.public;
         let new_version = self.version.saturating_add(1);
         let new_identity = Self::generate_and_store(new_version)?;
@@ -94,14 +99,17 @@ impl HardwareIdentity {
     }
 
     pub fn export_public_hik(&self) -> String {
+        // Returns the Base64-encoded string representation of the public HIK.
         Base64.encode(self.public.as_bytes())
     }
 
     pub fn public_key(&self) -> &PublicKey {
+        // Returns a reference to the inner X25519 public key.
         &self.public
     }
 
     pub fn secret(&self) -> &StaticSecret {
+        // Returns a reference to the inner X25519 secret key.
         &self.secret
     }
 }
@@ -111,6 +119,7 @@ pub struct PersonalNetworkKey(pub [u8; 32]);
 
 impl PersonalNetworkKey {
     pub fn new_random() -> Self {
+        // Generates a cryptographically secure, random 32-byte Personal Network Key.
         use rand::RngCore;
         let mut key = [0u8; 32];
         RandOsRng.fill_bytes(&mut key);
@@ -118,6 +127,7 @@ impl PersonalNetworkKey {
     }
 
     pub fn wrap(&self, target_public: &PublicKey, sender_secret: &StaticSecret) -> Result<Vec<u8>, CryptoError> {
+        // Performs Diffie-Hellman key exchange and wraps the PNK using ChaCha20Poly1305.
         let shared_secret = sender_secret.diffie_hellman(target_public);
         let cipher = ChaCha20Poly1305::new(shared_secret.as_bytes().into());
         let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
@@ -131,6 +141,7 @@ impl PersonalNetworkKey {
     }
 
     pub fn unwrap(wrapped: &[u8], sender_public: &PublicKey, recipient_secret: &StaticSecret) -> Result<Self, CryptoError> {
+        // Performs Diffie-Hellman key exchange and unwraps the encrypted PNK using ChaCha20Poly1305.
         if wrapped.len() < 12 {
             return Err(CryptoError::DecryptionFailed);
         }
@@ -154,6 +165,7 @@ impl PersonalNetworkKey {
     }
 
     pub fn as_base64(&self) -> String {
+        // Encodes the 32-byte PNK material into a standard Base64 string.
         Base64.encode(self.0)
     }
 }
