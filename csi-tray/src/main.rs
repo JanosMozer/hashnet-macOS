@@ -8,11 +8,13 @@ use tokio::net::UnixStream;
 
 #[tauri::command]
 async fn send_ipc_command(req: IpcRequest) -> Result<IpcResponse, String> {
+    // Tauri IPC command handler exposed to the HTML frontend.
     let res = send_ipc_command_inner(req).await.map_err(|e| e.to_string());
     res
 }
 
 async fn send_ipc_command_inner(req: IpcRequest) -> Result<IpcResponse> {
+    // Sends a JSON-serialized IPC request to the csid Unix Domain Socket and reads the response.
     let mut stream = UnixStream::connect("/tmp/csi.sock")
         .await
         .context("Failed to connect to csid daemon")?;
@@ -32,6 +34,7 @@ async fn send_ipc_command_inner(req: IpcRequest) -> Result<IpcResponse> {
 }
 
 fn main() {
+    // Entry point for the Tauri system tray frontend application.
     let system_tray = SystemTray::new();
 
     tauri::Builder::default()

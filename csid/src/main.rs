@@ -46,6 +46,7 @@ const CLIENT_ID: &str = "bluehash-desktop";
 const REDIRECT_URI: &str = "http://127.0.0.1:14555";
 
 fn get_hashnet_dir() -> Result<std::path::PathBuf> {
+    // Returns the absolute path of the local Hashnet directory and initializes its structure.
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
     let hashnet_dir = home.join("Hashnet");
     std::fs::create_dir_all(&hashnet_dir)?;
@@ -60,6 +61,7 @@ fn get_hashnet_dir() -> Result<std::path::PathBuf> {
 }
 
 fn load_manifest(hashnet_dir: &std::path::Path) -> Manifest {
+    // Loads the file manifest JSON from the local Hashnet config folder.
     let path = hashnet_dir.join(".hashnet/manifest.json");
     std::fs::read_to_string(&path)
         .ok()
@@ -115,6 +117,7 @@ struct UserInfoResponse {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Main entry point for the csid background daemon, establishing Unix socket and signal handlers.
     dotenvy::dotenv().ok();
     let _log_guard = match logging::init_logging() {
         Ok(g) => g,
@@ -284,6 +287,7 @@ async fn main() -> Result<()> {
 }
 
 async fn handle_client(mut stream: UnixStream, state: Arc<RwLock<DaemonState>>) -> Result<()> {
+    // Handles reading from and writing to a client Unix Domain Socket connection.
     let mut buf = vec![0u8; 4096];
 
     loop {
@@ -315,6 +319,7 @@ async fn handle_client(mut stream: UnixStream, state: Arc<RwLock<DaemonState>>) 
 }
 
 fn generate_pkce() -> (String, String) {
+    // Generates a random PKCE verifier and corresponding S256 challenge string for OAuth flow.
     let mut verifier_bytes = [0u8; 32];
     OsRng.fill_bytes(&mut verifier_bytes);
     let verifier = Base64Url.encode(verifier_bytes);
@@ -328,6 +333,7 @@ fn generate_pkce() -> (String, String) {
 }
 
 fn decode_jwt_claims(id_token: &str) -> Result<IdTokenClaims> {
+    // Decodes the claims from a JSON Web Token payload without signature verification.
     let parts: Vec<&str> = id_token.split('.').collect();
     if parts.len() != 3 {
         return Err(anyhow::anyhow!("Invalid JWT format"));
@@ -339,6 +345,7 @@ fn decode_jwt_claims(id_token: &str) -> Result<IdTokenClaims> {
 }
 
 async fn wait_for_oauth_code(listener: tokio::net::TcpListener, code_verifier: String) -> Result<(TokenResponse, IdTokenClaims)> {
+    // Spawns a temporary TCP server to listen for the redirect callback, capture the code, and trade it for tokens.
     use tokio::time::{timeout, Duration};
 
     let (stream, _) = timeout(Duration::from_secs(300), listener.accept())
@@ -436,7 +443,7 @@ async fn wait_for_oauth_code(listener: tokio::net::TcpListener, code_verifier: S
 </head>
 <body>
   <div class="card">
-    <h1>✅ Login Successful</h1>
+    <h1>Login Successful</h1>
     <p>You can close this tab.</p>
   </div>
   <script>setTimeout(() => window.close(), 2000);</script>
@@ -454,6 +461,7 @@ async fn wait_for_oauth_code(listener: tokio::net::TcpListener, code_verifier: S
 }
 
 fn parse_public_hik(b64: &str) -> anyhow::Result<X25519PublicKey> {
+    // Parses a Base64-encoded string into an X25519 public HIK key.
     let bytes = Base64.decode(b64)?;
     if bytes.len() != 32 {
         anyhow::bail!("invalid HIK length: {}", bytes.len());
@@ -464,6 +472,7 @@ fn parse_public_hik(b64: &str) -> anyhow::Result<X25519PublicKey> {
 }
 
 async fn drain_pending(state: &Arc<RwLock<DaemonState>>) {
+    // Processes all file paths queued in pending_encrypt while the client was offline.
     let pending: Vec<std::path::PathBuf> = {
         let mut s = state.write().await;
         s.pending_encrypt.drain(..).collect()
@@ -474,6 +483,7 @@ async fn drain_pending(state: &Arc<RwLock<DaemonState>>) {
 }
 
 async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> IpcResponse {
+    // Processes a single incoming IpcRequest against the current shared daemon state.
     match req {
         IpcRequest::GetStatus => {
             let s = state.read().await;
