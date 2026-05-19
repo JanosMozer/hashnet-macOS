@@ -13,6 +13,12 @@ pub struct WrappedPnk {
     pub created_at: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DesktopSession {
+    pub email: Option<String>,
+    pub image_url: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct DeviceKeyInfo {
     pub id: Uuid,
@@ -299,5 +305,20 @@ impl SupabaseClient {
 
         let pnks: Vec<WrappedPnk> = response.json().await?;
         Ok(pnks)
+    }
+
+    pub async fn get_desktop_session(&self, user_id: &str) -> Result<Option<DesktopSession>> {
+        // Fetches the user session from the public.desktop_sessions table if it exists.
+        let endpoint = format!("{}/rest/v1/desktop_sessions", self.url);
+        let response = self.client.get(&endpoint)
+            .query(&[
+                ("user_id", format!("eq.{}", user_id)),
+                ("select", "email,image_url".to_string()),
+            ])
+            .send().await?
+            .error_for_status()?;
+
+        let mut records: Vec<DesktopSession> = response.json().await?;
+        Ok(records.pop())
     }
 }

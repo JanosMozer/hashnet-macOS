@@ -24,6 +24,7 @@ pub enum IpcRequest {
     OpenFile { enc_path: String },
     Logout,
     EncryptFile { file_path: String },
+    SetDecryptionEnabled { enabled: bool },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -36,7 +37,8 @@ pub enum IpcResponse {
         state: String,
         hik: String,
         email: Option<String>,
-        image_url: Option<String>
+        image_url: Option<String>,
+        logged_in_user: Option<String>,
     },
     NetworkDevices(Vec<String>),
     Connections(Vec<String>),
