@@ -286,6 +286,22 @@
         }
       });
 
+      el('mainToggle').addEventListener('change', async function() {
+        var enabled = el('mainToggle').checked;
+        el('mainToggle').disabled = true;
+        if (enabled) {
+          el('userSub').textContent = 'Connected';
+          el('connectedSection').style.display = 'block';
+          sub.textContent = 'Connected';
+        } else {
+          el('userSub').textContent = 'Disconnected';
+          el('connectedSection').style.display = 'none';
+          sub.textContent = 'Disconnected';
+        }
+        await ipc({ SetDecryptionEnabled: { enabled: enabled } });
+        el('mainToggle').disabled = false;
+      });
+
       // Devices toggle
       el('btnNetwork').addEventListener('mousedown', function() {
         togglePanel('devices');
@@ -451,15 +467,11 @@
       // Poll state
       setInterval(async function() {
         var resp = await ipc('GetStatus');
-        if (resp && resp.Status && resp.Status.is_active) {
+        if (resp && resp.Status && resp.Status.logged_in_user) {
            var s = resp.Status;
            state.loggedIn = true;
            el('userName').textContent = s.email || 'User Profile';
-           el('userSub').textContent = 'Connected';
            el('accountChevron').style.display = 'inline';
-           el('connectedSection').style.display = 'block';
-           sub.textContent = 'Connected';
-           el('mainToggle').checked = true;
            
            if (s.image_url) {
              el('avatarBox').innerHTML = `<img src="${s.image_url}" alt="">`;
@@ -467,7 +479,20 @@
              var initial = (s.email || 'U')[0].toUpperCase();
              el('avatarBox').innerHTML = `<span>${initial}</span>`;
            }
-        } else if (!state.loggedIn) {
+
+           if (s.is_active) {
+             el('userSub').textContent = 'Connected';
+             el('connectedSection').style.display = 'block';
+             sub.textContent = 'Connected';
+             el('mainToggle').checked = true;
+           } else {
+             el('userSub').textContent = 'Disconnected';
+             el('connectedSection').style.display = 'none';
+             sub.textContent = 'Disconnected';
+             el('mainToggle').checked = false;
+           }
+           el('mainToggle').disabled = false;
+        } else {
            setLoggedOut();
         }
       }, 2000);

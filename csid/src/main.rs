@@ -82,6 +82,7 @@ struct DaemonState {
     manifest: Manifest,
     in_flight: HashSet<std::path::PathBuf>,
     pending_encrypt: VecDeque<std::path::PathBuf>,
+    decryption_disabled: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -155,6 +156,7 @@ async fn main() -> Result<()> {
         manifest,
         in_flight: HashSet::new(),
         pending_encrypt: VecDeque::new(),
+        decryption_disabled: false,
     }));
 
     let _watcher = watcher::start(hashnet_dir.join("encrypted"), state.clone())
@@ -165,11 +167,16 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-            let (broker, hik, logged_in) = {
+            let (broker, hik, logged_in, decryption_disabled) = {
                 let s = state_heartbeat.read().await;
-                (s.broker.clone(), s.identity.export_public_hik(), s.logged_in_user.is_some())
+                (
+                    s.broker.clone(),
+                    s.identity.export_public_hik(),
+                    s.logged_in_user.is_some(),
+                    s.decryption_disabled,
+                )
             };
-            if logged_in {
+            if logged_in && !decryption_disabled {
                 if let Some(client) = broker {
                     // Update device's last_seen_at timestamp
                     if let Err(e) = client.update_last_seen(hik).await {
@@ -186,16 +193,18 @@ async fn main() -> Result<()> {
         const PNK_ROTATION_INTERVAL_SECS: u64 = 86_400; // 24 hours
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(PNK_ROTATION_INTERVAL_SECS)).await;
-            let (broker, user_id, hik_secret, current_version) = {
+            let (broker, user_id, hik_secret, current_version, decryption_disabled) = {
                 let s = state_rotation.read().await;
                 (
                     s.broker.clone(),
                     s.logged_in_user.clone(),
                     s.identity.secret().clone(),
                     s.key_version,
+                    s.decryption_disabled,
                 )
             };
-            if let (Some(broker), Some(uid)) = (broker, user_id) {
+            if !decryption_disabled {
+                if let (Some(broker), Some(uid)) = (broker, user_id) {
                 let new_pnk = PersonalNetworkKey::new_random();
                 let new_version = current_version.saturating_add(1);
                 match broker.get_devices_for_key_distribution(&uid).await {
@@ -227,6 +236,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
+    }
     });
 
     let socket_path = "/tmp/csi.sock";
@@ -460,6 +470,29 @@ async fn wait_for_oauth_code(listener: tokio::net::TcpListener, code_verifier: S
     Ok((token_data, claims))
 }
 
+async fn fetch_and_update_profile(user_id: &str, state: &Arc<RwLock<DaemonState>>) {
+    // Fetches the user's details from the public.desktop_sessions table and updates the state.
+    let broker = {
+        let s = state.read().await;
+        s.broker.clone()
+    };
+    if let Some(broker) = broker {
+        if let Ok(Some(session)) = broker.get_desktop_session(user_id).await {
+            let mut s = state.write().await;
+            if let Some(email) = session.email {
+                if !email.trim().is_empty() {
+                    s.user_email = Some(email);
+                }
+            }
+            if let Some(img) = session.image_url {
+                if !img.trim().is_empty() {
+                    s.user_image = Some(img);
+                }
+            }
+        }
+    }
+}
+
 fn parse_public_hik(b64: &str) -> anyhow::Result<X25519PublicKey> {
     // Parses a Base64-encoded string into an X25519 public HIK key.
     let bytes = Base64.decode(b64)?;
@@ -494,7 +527,7 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
             };
 
             let hostname = gethostname::gethostname().to_string_lossy().to_string();
-            let is_active = s.logged_in_user.is_some();
+            let is_active = s.logged_in_user.is_some() && !s.decryption_disabled;
 
             IpcResponse::Status {
                 hostname,
@@ -503,6 +536,7 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
                 hik: s.identity.export_public_hik(),
                 email: s.user_email.clone(),
                 image_url: s.user_image.clone(),
+                logged_in_user: s.logged_in_user.clone(),
             }
         }
         IpcRequest::StartOAuthFlow => {
@@ -555,6 +589,8 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
                             s.user_image = claims.picture.clone();
                             s.broker.clone()
                         };
+
+                        fetch_and_update_profile(&claims.sub, &state_clone).await;
 
                         if let Some(broker) = broker {
                             let hostname = gethostname::gethostname().to_string_lossy().to_string();
@@ -964,6 +1000,8 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
                 s.broker.clone()
             };
 
+            fetch_and_update_profile(&user_id, state).await;
+
             if let Some(broker) = broker {
                 let hostname = gethostname::gethostname().to_string_lossy().to_string();
                 let hik = {
@@ -1037,6 +1075,9 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
         }
         IpcRequest::GetNetworkDevices => {
             let s = state.read().await;
+            if s.decryption_disabled {
+                return IpcResponse::Error("Communication is suspended".into());
+            }
             if let (Some(broker), Some(uid)) = (&s.broker, s.logged_in_user.clone()) {
                 if let Ok(devs) = broker.get_active_devices(uid).await {
                     return IpcResponse::NetworkDevices(devs);
@@ -1046,6 +1087,9 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
         }
         IpcRequest::GetConnections => {
             let s = state.read().await;
+            if s.decryption_disabled {
+                return IpcResponse::Error("Communication is suspended".into());
+            }
             if let (Some(broker), Some(uid)) = (&s.broker, s.logged_in_user.clone()) {
                 if let Ok(conns) = broker.get_connections(uid).await {
                     return IpcResponse::Connections(conns);
@@ -1064,6 +1108,7 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
             s.user_image = None;
             s.pnk = None;
             s.device_id = None;
+            s.decryption_disabled = false;
             IpcResponse::Success
         }
         IpcRequest::GetFiles => {
@@ -1079,10 +1124,13 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
             IpcResponse::Files(files)
         }
         IpcRequest::OpenFile { enc_path } => {
-            let pnk_bytes = {
+            let (pnk_bytes, decryption_disabled) = {
                 let s = state.read().await;
-                s.pnk.as_ref().map(|p| p.0)
+                (s.pnk.as_ref().map(|p| p.0), s.decryption_disabled)
             };
+            if decryption_disabled {
+                return IpcResponse::Error("Decryption is suspended. Enable it first.".into());
+            }
             let Some(key_bytes) = pnk_bytes else {
                 return IpcResponse::Error("Not logged in — cannot decrypt".into());
             };
@@ -1111,6 +1159,15 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
             // Watcher handles in-place encryption; this is a manual trigger
             let path = std::path::PathBuf::from(&file_path);
             watcher::encrypt_file_from_watcher_pub(path, state).await;
+            IpcResponse::Success
+        }
+        IpcRequest::SetDecryptionEnabled { enabled } => {
+            let mut s = state.write().await;
+            s.decryption_disabled = !enabled;
+            if let Some(broker) = &s.broker {
+                let hik = s.identity.export_public_hik();
+                let _ = broker.set_device_status(hik, enabled).await;
+            }
             IpcResponse::Success
         }
     }
