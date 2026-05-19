@@ -149,6 +149,10 @@
         <div class="row" id="btnSync">
           <div class="row-text"><div class="title">Sync Keys</div></div>
         </div>
+
+        <div class="row" id="btnRotateKeys">
+          <div class="row-text"><div class="title">Rotate Keys</div></div>
+        </div>
         <hr>
       </div>
 
@@ -163,6 +167,7 @@
         <div class="modal-row danger" id="modalLogout">Logout</div>
       </div>
     </div>
+
   </div>
 
   <script>
@@ -241,6 +246,20 @@
         setLoggedOut();
       });
 
+      el('btnRotateKeys').addEventListener('mousedown', async function() {
+        var btn = el('btnRotateKeys');
+        var titleEl = btn.querySelector('.row-text .title');
+        var origText = titleEl.textContent;
+        titleEl.textContent = 'Rotating Keys...';
+        btn.style.pointerEvents = 'none';
+        await ipc('RotateKeys');
+        titleEl.textContent = 'Keys Rotated';
+        setTimeout(function() {
+          titleEl.textContent = origText;
+          btn.style.pointerEvents = '';
+        }, 1500);
+      });
+
       function setLoggedOut() {
         state.loggedIn = false;
         state.panels.devices.open = false;
@@ -265,6 +284,22 @@
         } else {
           window.close();
         }
+      });
+
+      el('mainToggle').addEventListener('change', async function() {
+        var enabled = el('mainToggle').checked;
+        el('mainToggle').disabled = true;
+        if (enabled) {
+          el('userSub').textContent = 'Connected';
+          el('connectedSection').style.display = 'block';
+          sub.textContent = 'Connected';
+        } else {
+          el('userSub').textContent = 'Disconnected';
+          el('connectedSection').style.display = 'none';
+          sub.textContent = 'Disconnected';
+        }
+        await ipc({ SetDecryptionEnabled: { enabled: enabled } });
+        el('mainToggle').disabled = false;
       });
 
       // Devices toggle
@@ -344,8 +379,13 @@
                   btn.disabled = true;
                   btn.textContent = '…';
                   var r = await ipc({ OpenFile: { enc_path: btn.dataset.enc } });
-                  if (r && r.Error) { btn.textContent = 'Err'; setTimeout(function(){ btn.textContent='Open'; btn.disabled=false; }, 2000); }
-                  else { btn.textContent = 'Open'; btn.disabled = false; }
+                  if (!r || r.Error) {
+                    btn.textContent = 'Err';
+                    setTimeout(function(){ btn.textContent='Open'; btn.disabled=false; }, 2000);
+                  } else {
+                    btn.textContent = 'Open';
+                    btn.disabled = false;
+                  }
                 });
               });
             }
@@ -427,15 +467,11 @@
       // Poll state
       setInterval(async function() {
         var resp = await ipc('GetStatus');
-        if (resp && resp.Status && resp.Status.is_active) {
+        if (resp && resp.Status && resp.Status.logged_in_user) {
            var s = resp.Status;
            state.loggedIn = true;
            el('userName').textContent = s.email || 'User Profile';
-           el('userSub').textContent = 'Connected';
            el('accountChevron').style.display = 'inline';
-           el('connectedSection').style.display = 'block';
-           sub.textContent = 'Connected';
-           el('mainToggle').checked = true;
            
            if (s.image_url) {
              el('avatarBox').innerHTML = `<img src="${s.image_url}" alt="">`;
@@ -443,7 +479,20 @@
              var initial = (s.email || 'U')[0].toUpperCase();
              el('avatarBox').innerHTML = `<span>${initial}</span>`;
            }
-        } else if (!state.loggedIn) {
+
+           if (s.is_active) {
+             el('userSub').textContent = 'Connected';
+             el('connectedSection').style.display = 'block';
+             sub.textContent = 'Connected';
+             el('mainToggle').checked = true;
+           } else {
+             el('userSub').textContent = 'Disconnected';
+             el('connectedSection').style.display = 'none';
+             sub.textContent = 'Disconnected';
+             el('mainToggle').checked = false;
+           }
+           el('mainToggle').disabled = false;
+        } else {
            setLoggedOut();
         }
       }, 2000);

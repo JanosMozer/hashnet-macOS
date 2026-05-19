@@ -24,6 +24,7 @@ extern "C" {
 const SERVICE: &str = "com.hashnet.csid";
 
 pub fn store_device_secret(account: &str, secret: &[u8]) -> Result<()> {
+    // Stores a secret byte slice bound to a specific account key inside the secure macOS Keychain.
     let _ = delete_device_secret(account);
 
     let query: Vec<(CFString, CFType)> = vec![
@@ -58,6 +59,7 @@ pub fn store_device_secret(account: &str, secret: &[u8]) -> Result<()> {
 }
 
 pub fn load_device_secret(account: &str) -> Result<Vec<u8>> {
+    // Retrieves a secret byte vector bound to a specific account key from the secure macOS Keychain.
     let query: Vec<(CFString, CFType)> = vec![
         (
             unsafe { CFString::wrap_under_get_rule(kSecClass) },
@@ -97,6 +99,7 @@ pub fn load_device_secret(account: &str) -> Result<Vec<u8>> {
 }
 
 pub fn delete_device_secret(account: &str) -> Result<()> {
+    // Deletes a secret entry bound to a specific account key from the secure macOS Keychain.
     let query: Vec<(CFString, CFType)> = vec![
         (
             unsafe { CFString::wrap_under_get_rule(kSecClass) },
@@ -122,6 +125,7 @@ pub fn delete_device_secret(account: &str) -> Result<()> {
 
 /// Store PersonalNetworkKey (32-byte key material) in Keychain
 pub fn store_pnk(key_bytes: &[u8; 32]) -> Result<()> {
+    // Stores the 32-byte Personal Network Key (PNK) material inside the secure macOS Keychain.
     let _ = delete_pnk();
 
     let query: Vec<(CFString, CFType)> = vec![
@@ -157,6 +161,7 @@ pub fn store_pnk(key_bytes: &[u8; 32]) -> Result<()> {
 
 /// Load PersonalNetworkKey (32-byte key material) from Keychain
 pub fn load_pnk() -> Result<[u8; 32]> {
+    // Retrieves the 32-byte Personal Network Key (PNK) material from the secure macOS Keychain.
     let query: Vec<(CFString, CFType)> = vec![
         (
             unsafe { CFString::wrap_under_get_rule(kSecClass) },
@@ -203,6 +208,7 @@ pub fn load_pnk() -> Result<[u8; 32]> {
 
 /// Delete PersonalNetworkKey from Keychain
 pub fn delete_pnk() -> Result<()> {
+    // Deletes the Personal Network Key (PNK) entry from the secure macOS Keychain.
     let query: Vec<(CFString, CFType)> = vec![
         (
             unsafe { CFString::wrap_under_get_rule(kSecClass) },

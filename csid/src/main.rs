@@ -12,7 +12,6 @@ use rand::RngCore;
 use rand::rngs::OsRng;
 use serde::Deserialize;
 use tracing::{error, info};
-use chacha20poly1305::{ChaCha20Poly1305, aead::{Aead, AeadCore, KeyInit}};
 
 use csi_core::broker::SupabaseClient;
 use csi_core::crypto::{HardwareIdentity, PersonalNetworkKey};
@@ -23,7 +22,6 @@ mod logging;
 mod watcher;
 
 use std::collections::{HashSet, VecDeque};
-use serde::{Serialize};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct ManifestEntry {
@@ -48,6 +46,7 @@ const CLIENT_ID: &str = "bluehash-desktop";
 const REDIRECT_URI: &str = "http://127.0.0.1:14555";
 
 fn get_hashnet_dir() -> Result<std::path::PathBuf> {
+    // Returns the absolute path of the local Hashnet directory and initializes its structure.
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
     let hashnet_dir = home.join("Hashnet");
     std::fs::create_dir_all(&hashnet_dir)?;
@@ -62,6 +61,7 @@ fn get_hashnet_dir() -> Result<std::path::PathBuf> {
 }
 
 fn load_manifest(hashnet_dir: &std::path::Path) -> Manifest {
+    // Loads the file manifest JSON from the local Hashnet config folder.
     let path = hashnet_dir.join(".hashnet/manifest.json");
     std::fs::read_to_string(&path)
         .ok()
@@ -82,6 +82,7 @@ struct DaemonState {
     manifest: Manifest,
     in_flight: HashSet<std::path::PathBuf>,
     pending_encrypt: VecDeque<std::path::PathBuf>,
+    decryption_disabled: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -117,6 +118,7 @@ struct UserInfoResponse {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Main entry point for the csid background daemon, establishing Unix socket and signal handlers.
     dotenvy::dotenv().ok();
     let _log_guard = match logging::init_logging() {
         Ok(g) => g,
@@ -154,6 +156,7 @@ async fn main() -> Result<()> {
         manifest,
         in_flight: HashSet::new(),
         pending_encrypt: VecDeque::new(),
+        decryption_disabled: false,
     }));
 
     let _watcher = watcher::start(hashnet_dir.join("encrypted"), state.clone())
@@ -164,11 +167,16 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-            let (broker, hik, logged_in) = {
+            let (broker, hik, logged_in, decryption_disabled) = {
                 let s = state_heartbeat.read().await;
-                (s.broker.clone(), s.identity.export_public_hik(), s.logged_in_user.is_some())
+                (
+                    s.broker.clone(),
+                    s.identity.export_public_hik(),
+                    s.logged_in_user.is_some(),
+                    s.decryption_disabled,
+                )
             };
-            if logged_in {
+            if logged_in && !decryption_disabled {
                 if let Some(client) = broker {
                     // Update device's last_seen_at timestamp
                     if let Err(e) = client.update_last_seen(hik).await {
@@ -185,16 +193,18 @@ async fn main() -> Result<()> {
         const PNK_ROTATION_INTERVAL_SECS: u64 = 86_400; // 24 hours
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(PNK_ROTATION_INTERVAL_SECS)).await;
-            let (broker, user_id, hik_secret, current_version) = {
+            let (broker, user_id, hik_secret, current_version, decryption_disabled) = {
                 let s = state_rotation.read().await;
                 (
                     s.broker.clone(),
                     s.logged_in_user.clone(),
                     s.identity.secret().clone(),
                     s.key_version,
+                    s.decryption_disabled,
                 )
             };
-            if let (Some(broker), Some(uid)) = (broker, user_id) {
+            if !decryption_disabled {
+                if let (Some(broker), Some(uid)) = (broker, user_id) {
                 let new_pnk = PersonalNetworkKey::new_random();
                 let new_version = current_version.saturating_add(1);
                 match broker.get_devices_for_key_distribution(&uid).await {
@@ -226,6 +236,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
+    }
     });
 
     let socket_path = "/tmp/csi.sock";
@@ -286,6 +297,7 @@ async fn main() -> Result<()> {
 }
 
 async fn handle_client(mut stream: UnixStream, state: Arc<RwLock<DaemonState>>) -> Result<()> {
+    // Handles reading from and writing to a client Unix Domain Socket connection.
     let mut buf = vec![0u8; 4096];
 
     loop {
@@ -317,6 +329,7 @@ async fn handle_client(mut stream: UnixStream, state: Arc<RwLock<DaemonState>>) 
 }
 
 fn generate_pkce() -> (String, String) {
+    // Generates a random PKCE verifier and corresponding S256 challenge string for OAuth flow.
     let mut verifier_bytes = [0u8; 32];
     OsRng.fill_bytes(&mut verifier_bytes);
     let verifier = Base64Url.encode(verifier_bytes);
@@ -330,6 +343,7 @@ fn generate_pkce() -> (String, String) {
 }
 
 fn decode_jwt_claims(id_token: &str) -> Result<IdTokenClaims> {
+    // Decodes the claims from a JSON Web Token payload without signature verification.
     let parts: Vec<&str> = id_token.split('.').collect();
     if parts.len() != 3 {
         return Err(anyhow::anyhow!("Invalid JWT format"));
@@ -341,6 +355,7 @@ fn decode_jwt_claims(id_token: &str) -> Result<IdTokenClaims> {
 }
 
 async fn wait_for_oauth_code(listener: tokio::net::TcpListener, code_verifier: String) -> Result<(TokenResponse, IdTokenClaims)> {
+    // Spawns a temporary TCP server to listen for the redirect callback, capture the code, and trade it for tokens.
     use tokio::time::{timeout, Duration};
 
     let (stream, _) = timeout(Duration::from_secs(300), listener.accept())
@@ -438,7 +453,7 @@ async fn wait_for_oauth_code(listener: tokio::net::TcpListener, code_verifier: S
 </head>
 <body>
   <div class="card">
-    <h1> Login Successful</h1>
+    <h1>Login Successful</h1>
     <p>You can close this tab.</p>
   </div>
   <script>setTimeout(() => window.close(), 2000);</script>
@@ -455,7 +470,31 @@ async fn wait_for_oauth_code(listener: tokio::net::TcpListener, code_verifier: S
     Ok((token_data, claims))
 }
 
+async fn fetch_and_update_profile(user_id: &str, state: &Arc<RwLock<DaemonState>>) {
+    // Fetches the user's details from the public.desktop_sessions table and updates the state.
+    let broker = {
+        let s = state.read().await;
+        s.broker.clone()
+    };
+    if let Some(broker) = broker {
+        if let Ok(Some(session)) = broker.get_desktop_session(user_id).await {
+            let mut s = state.write().await;
+            if let Some(email) = session.email {
+                if !email.trim().is_empty() {
+                    s.user_email = Some(email);
+                }
+            }
+            if let Some(img) = session.image_url {
+                if !img.trim().is_empty() {
+                    s.user_image = Some(img);
+                }
+            }
+        }
+    }
+}
+
 fn parse_public_hik(b64: &str) -> anyhow::Result<X25519PublicKey> {
+    // Parses a Base64-encoded string into an X25519 public HIK key.
     let bytes = Base64.decode(b64)?;
     if bytes.len() != 32 {
         anyhow::bail!("invalid HIK length: {}", bytes.len());
@@ -466,6 +505,7 @@ fn parse_public_hik(b64: &str) -> anyhow::Result<X25519PublicKey> {
 }
 
 async fn drain_pending(state: &Arc<RwLock<DaemonState>>) {
+    // Processes all file paths queued in pending_encrypt while the client was offline.
     let pending: Vec<std::path::PathBuf> = {
         let mut s = state.write().await;
         s.pending_encrypt.drain(..).collect()
@@ -476,6 +516,7 @@ async fn drain_pending(state: &Arc<RwLock<DaemonState>>) {
 }
 
 async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> IpcResponse {
+    // Processes a single incoming IpcRequest against the current shared daemon state.
     match req {
         IpcRequest::GetStatus => {
             let s = state.read().await;
@@ -486,7 +527,7 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
             };
 
             let hostname = gethostname::gethostname().to_string_lossy().to_string();
-            let is_active = s.logged_in_user.is_some();
+            let is_active = s.logged_in_user.is_some() && !s.decryption_disabled;
 
             IpcResponse::Status {
                 hostname,
@@ -495,6 +536,7 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
                 hik: s.identity.export_public_hik(),
                 email: s.user_email.clone(),
                 image_url: s.user_image.clone(),
+                logged_in_user: s.logged_in_user.clone(),
             }
         }
         IpcRequest::StartOAuthFlow => {
@@ -539,14 +581,16 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
             tokio::spawn(async move {
                 match wait_for_oauth_code(listener, verifier).await {
                     Ok((_token_data, claims)) => {
-                        let (broker, key_version) = {
+                        let broker = {
                             let mut s = state_clone.write().await;
                             s.oauth_listening = false;
                             s.logged_in_user = Some(claims.sub.clone());
                             s.user_email = claims.email.clone();
                             s.user_image = claims.picture.clone();
-                            (s.broker.clone(), s.key_version)
+                            s.broker.clone()
                         };
+
+                        fetch_and_update_profile(&claims.sub, &state_clone).await;
 
                         if let Some(broker) = broker {
                             let hostname = gethostname::gethostname().to_string_lossy().to_string();
@@ -737,6 +781,11 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
                         if push_errors > 0 {
                             return IpcResponse::Error(format!("PNK rotated but {} device(s) failed", push_errors));
                         }
+                        // Persist new PNK to Keychain
+                        if let Err(e) = csi_core::keychain::store_pnk(&new_pnk.0) {
+                            error!("Failed to persist PNK to Keychain: {}", e);
+                            return IpcResponse::Error("Failed to save PNK to Keychain".into());
+                        }
                         let mut s = state.write().await;
                         s.pnk = Some(new_pnk);
                         s.key_version = new_version;
@@ -816,12 +865,142 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
                 IpcResponse::Error("Not logged in".into())
             }
         }
+        IpcRequest::RotateKeys => {
+            // Atomic key rotation: new HIK + new PNK + re-encrypt all files
+            let (broker, user_id, device_id, old_pnk_bytes) = {
+                let s = state.read().await;
+                (
+                    s.broker.clone(),
+                    s.logged_in_user.clone(),
+                    s.device_id,
+                    s.pnk.as_ref().map(|p| p.0),
+                )
+            };
+
+            let broker = match broker {
+                Some(b) => b,
+                None => return IpcResponse::Error("Not logged in".into()),
+            };
+
+            let uid = match user_id {
+                Some(u) => u,
+                None => return IpcResponse::Error("Not logged in".into()),
+            };
+
+            let device_id = match device_id {
+                Some(d) => d,
+                None => return IpcResponse::Error("No device registered".into()),
+            };
+
+            let old_pnk = match old_pnk_bytes {
+                Some(p) => p,
+                None => return IpcResponse::Error("PNK not available".into()),
+            };
+
+            // 1. Generate new HIK and new PNK in memory (don't persist yet)
+            let new_pnk = PersonalNetworkKey::new_random();
+
+            // 1b. Create manifest for rotation (cloned from state)
+            let manifest_for_rotation = {
+                let s = state.read().await;
+                Arc::new(tokio::sync::Mutex::new(s.manifest.clone()))
+            };
+
+            // 2. Re-encrypt all .enc files with new PNK (safe two-phase)
+            let files_count = match watcher::re_encrypt_all(
+                manifest_for_rotation.clone(),
+                &old_pnk,
+                &new_pnk.0,
+            ).await {
+                Ok(count) => {
+                    info!("Successfully re-encrypted {} files", count);
+                    // Merge re-encrypted entries back to state (keeps any files added during rotation)
+                    {
+                        let mut s = state.write().await;
+                        let rotated = manifest_for_rotation.lock().await;
+                        for (enc_path, entry) in &rotated.files {
+                            s.manifest.files.insert(enc_path.clone(), entry.clone());
+                        }
+                        let _ = watcher::save_manifest(&s.manifest);
+                    }
+                    count
+                }
+                Err(e) => {
+                    error!("Re-encryption failed: {}", e);
+                    return IpcResponse::Error(format!("Re-encryption failed: {}", e));
+                }
+            };
+
+            // 3. Rotate HIK (generates and stores new X25519 key to Keychain)
+            let (new_hik_pub, new_hik_secret, new_hik_version) = {
+                let mut s = state.write().await;
+                match s.identity.rotate() {
+                    Ok(_old_pub) => {
+                        let pub_key = *s.identity.public_key();
+                        let sec_key = s.identity.secret().clone();
+                        let ver = s.identity.version;
+                        (pub_key, sec_key, ver)
+                    }
+                    Err(e) => {
+                        error!("HIK rotation failed: {}", e);
+                        return IpcResponse::Error(format!("HIK rotation failed: {}", e));
+                    }
+                }
+            };
+
+            // 4. Persist new PNK to Keychain
+            if let Err(e) = csi_core::keychain::store_pnk(&new_pnk.0) {
+                error!("Failed to persist new PNK to Keychain: {}", e);
+                return IpcResponse::Error("Failed to save PNK to Keychain".into());
+            }
+
+            // 5. Update daemon state
+            {
+                let mut s = state.write().await;
+                s.pnk = Some(PersonalNetworkKey(new_pnk.0));
+                s.key_version = s.key_version.saturating_add(1);
+            }
+
+            let new_key_version = {
+                let s = state.read().await;
+                s.key_version
+            };
+
+            // 6. Update device's public HIK in database
+            let new_hik_b64 = Base64.encode(new_hik_pub.as_bytes());
+            if let Err(e) = broker.update_device_hik(device_id, &new_hik_b64, new_hik_version).await {
+                error!("Failed to update HIK in DB: {}", e);
+                return IpcResponse::Error("DB update for HIK failed".into());
+            }
+
+            // 7. Wrap new PNK for all user devices and push to key_broker
+            if let Ok(devices) = broker.get_devices_for_key_distribution(&uid).await {
+                for device in &devices {
+                    if let Ok(target_pub) = parse_public_hik(&device.public_hik) {
+                        if let Ok(wrapped) = new_pnk.wrap(&target_pub, &new_hik_secret) {
+                            let b64 = Base64.encode(&wrapped);
+                            let _ = broker.push_wrapped_pnk(
+                                device.id,
+                                uid.parse().unwrap_or_default(),
+                                b64,
+                                new_key_version,
+                            ).await;
+                        }
+                    }
+                }
+            }
+
+            info!("Key rotation complete: HIK rotated, PNK rotated, {} files re-encrypted", files_count);
+            IpcResponse::Success
+        }
         IpcRequest::Login { user_id } => {
-            let (broker, key_version) = {
+            let broker = {
                 let mut s = state.write().await;
                 s.logged_in_user = Some(user_id.clone());
-                (s.broker.clone(), s.key_version)
+                s.broker.clone()
             };
+
+            fetch_and_update_profile(&user_id, state).await;
 
             if let Some(broker) = broker {
                 let hostname = gethostname::gethostname().to_string_lossy().to_string();
@@ -896,6 +1075,9 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
         }
         IpcRequest::GetNetworkDevices => {
             let s = state.read().await;
+            if s.decryption_disabled {
+                return IpcResponse::Error("Communication is suspended".into());
+            }
             if let (Some(broker), Some(uid)) = (&s.broker, s.logged_in_user.clone()) {
                 if let Ok(devs) = broker.get_active_devices(uid).await {
                     return IpcResponse::NetworkDevices(devs);
@@ -905,6 +1087,9 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
         }
         IpcRequest::GetConnections => {
             let s = state.read().await;
+            if s.decryption_disabled {
+                return IpcResponse::Error("Communication is suspended".into());
+            }
             if let (Some(broker), Some(uid)) = (&s.broker, s.logged_in_user.clone()) {
                 if let Ok(conns) = broker.get_connections(uid).await {
                     return IpcResponse::Connections(conns);
@@ -923,6 +1108,7 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
             s.user_image = None;
             s.pnk = None;
             s.device_id = None;
+            s.decryption_disabled = false;
             IpcResponse::Success
         }
         IpcRequest::GetFiles => {
@@ -938,10 +1124,13 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
             IpcResponse::Files(files)
         }
         IpcRequest::OpenFile { enc_path } => {
-            let pnk_bytes = {
+            let (pnk_bytes, decryption_disabled) = {
                 let s = state.read().await;
-                s.pnk.as_ref().map(|p| p.0)
+                (s.pnk.as_ref().map(|p| p.0), s.decryption_disabled)
             };
+            if decryption_disabled {
+                return IpcResponse::Error("Decryption is suspended. Enable it first.".into());
+            }
             let Some(key_bytes) = pnk_bytes else {
                 return IpcResponse::Error("Not logged in — cannot decrypt".into());
             };
@@ -970,6 +1159,15 @@ async fn process_request(req: IpcRequest, state: &Arc<RwLock<DaemonState>>) -> I
             // Watcher handles in-place encryption; this is a manual trigger
             let path = std::path::PathBuf::from(&file_path);
             watcher::encrypt_file_from_watcher_pub(path, state).await;
+            IpcResponse::Success
+        }
+        IpcRequest::SetDecryptionEnabled { enabled } => {
+            let mut s = state.write().await;
+            s.decryption_disabled = !enabled;
+            if let Some(broker) = &s.broker {
+                let hik = s.identity.export_public_hik();
+                let _ = broker.set_device_status(hik, enabled).await;
+            }
             IpcResponse::Success
         }
     }
