@@ -70,6 +70,3 @@ cargo run --bin csi-tray
 ```
 
 ---
-
-## Database Configuration
-The database schemas, device presence records, and wrapped personal keys tables are described in [database.sql](file:///Users/mozer/Documents/projects/tray-macos/database.sql). Apply this file to your Supabase SQL Editor.

@@ -40,6 +40,18 @@ fn main() {
     tauri::Builder::default()
         .setup(|_app| {
             tauri::async_runtime::spawn(async move {
+                // If csid is not reachable, spawn it from the same directory as this binary
+                if UnixStream::connect("/tmp/csi.sock").await.is_err() {
+                    if let Ok(exe_path) = std::env::current_exe() {
+                        if let Some(bin_dir) = exe_path.parent() {
+                            let csid_path = bin_dir.join("csid");
+                            if csid_path.exists() {
+                                let _ = std::process::Command::new(csid_path).spawn();
+                            }
+                        }
+                    }
+                }
+
                 for attempt in 1..=20 {
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                     match send_ipc_command_inner(csi_ipc::IpcRequest::GetStatus).await {
